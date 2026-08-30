@@ -1,0 +1,1145 @@
+---
+title: "Updates"
+author: "Julie Hunter"
+date: "2026-08-25"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Updates to be made after comments on first draft:
+
+```{r}
+# Performances per athlete
+f.perfs.per.athlete <- f.swim.data %>%
+  group_by(athlete) %>%
+  summarise(n_perfs = n())
+
+m.perfs.per.athlete <- m.swim.data %>%
+  group_by(athlete) %>%
+  summarise(n_perfs = n())
+
+# Performances per season per athlete
+f.perfs.per.season <- f.swim.data %>%
+  group_by(athlete, Season) %>%
+  summarise(n_perfs = n(), .groups = "drop")
+
+m.perfs.per.season <- m.swim.data %>%
+  group_by(athlete, Season) %>%
+  summarise(n_perfs = n(), .groups = "drop")
+
+# Career length (number of seasons) per athlete
+f.career.length <- f.swim.data %>%
+  group_by(athlete) %>%
+  summarise(n_seasons = n_distinct(Season))
+
+m.career.length <- m.swim.data %>%
+  group_by(athlete) %>%
+  summarise(n_seasons = n_distinct(Season))
+
+# Build the summary table
+summary.stats <- data.frame(
+  Statistic = c(
+    "Performances per athlete",
+    "Performances per season per athlete",
+    "Career length (seasons)"
+  ),
+  Female.Mean = c(mean(f.perfs.per.athlete$n_perfs),
+                    mean(f.perfs.per.season$n_perfs),
+                    mean(f.career.length$n_seasons)),
+  Female.Median = c(median(f.perfs.per.athlete$n_perfs),
+                    median(f.perfs.per.season$n_perfs),
+                    median(f.career.length$n_seasons)),
+  Female.SD = c(sd(f.perfs.per.athlete$n_perfs),
+                    sd(f.perfs.per.season$n_perfs),
+                    sd(f.career.length$n_seasons)),
+  Female.Min = c(min(f.perfs.per.athlete$n_perfs),
+                    min(f.perfs.per.season$n_perfs),
+                    min(f.career.length$n_seasons)),
+  Female.Max = c(max(f.perfs.per.athlete$n_perfs),
+                    max(f.perfs.per.season$n_perfs),
+                    max(f.career.length$n_seasons)),
+  Male.Mean = c(mean(m.perfs.per.athlete$n_perfs),
+                    mean(m.perfs.per.season$n_perfs),
+                    mean(m.career.length$n_seasons)),
+  Male.Median = c(median(m.perfs.per.athlete$n_perfs),
+                    median(m.perfs.per.season$n_perfs),
+                    median(m.career.length$n_seasons)),
+  Male.SD = c(sd(m.perfs.per.athlete$n_perfs),
+                    sd(m.perfs.per.season$n_perfs),
+                    sd(m.career.length$n_seasons)),
+  Male.Min = c(min(m.perfs.per.athlete$n_perfs),
+                    min(m.perfs.per.season$n_perfs),
+                    min(m.career.length$n_seasons)),
+  Male.Max = c(max(m.perfs.per.athlete$n_perfs),
+                    max(m.perfs.per.season$n_perfs),
+                    max(m.career.length$n_seasons))
+)
+
+# Round to 1 decimal place
+summary.stats[, -1] <- round(summary.stats[, -1], 1)
+
+print(summary.stats)
+
+
+# PLOT 1: DISTRIBUTION OF RACE TIMES (Density plot)
+f.times <- f.swim.data$TimeSeconds
+m.times <- m.swim.data$TimeSeconds
+
+f.dens <- density(f.times, na.rm = TRUE)
+m.dens <- density(m.times, na.rm = TRUE)
+
+# Set x and y limits to accommodate both
+xlim.range <- range(c(f.dens$x, m.dens$x))
+ylim.range <- c(0, max(c(f.dens$y, m.dens$y)) * 1.1)
+
+plot(f.dens,
+     main = "Distribution of Race Times by Gender",
+     xlab = "Time (seconds)", ylab = "Density",
+     xlim = xlim.range, ylim = ylim.range,
+     col = "palevioletred", lwd = 2)
+lines(m.dens, col = "cornflowerblue", lwd = 2)
+legend("topright",
+       legend = c("Female", "Male"),
+       col = c("palevioletred", "cornflowerblue"), lwd = 2)
+
+
+# PLOT 2: SEASON-TO-SEASON VARIABILITY IN SEASON BESTS
+
+# Compute season best per athlete per season
+f.season.bests <- f.swim.data %>%
+  group_by(athlete, Season) %>%
+  summarise(season.best = min(TimeSeconds, na.rm = TRUE), .groups = "drop")
+
+m.season.bests <- m.swim.data %>%
+  group_by(athlete, Season) %>%
+  summarise(season.best = min(TimeSeconds, na.rm = TRUE), .groups = "drop")
+
+# Compute within-athlete SD of season bests
+f.sb.sd <- f.season.bests %>%
+  group_by(athlete) %>%
+  summarise(sb.sd = sd(season.best, na.rm = TRUE))
+
+m.sb.sd <- m.season.bests %>%
+  group_by(athlete) %>%
+  summarise(sb.sd = sd(season.best, na.rm = TRUE))
+
+# Boxplot comparing the two groups
+boxplot(list(Female = f.sb.sd$sb.sd, Male = m.sb.sd$sb.sd),
+        main = "Season-to-Season Variability in Season Bests by Gender",
+        ylab = "SD of Season Bests (seconds)",
+        col = c("palevioletred", "cornflowerblue"),  border = "black")
+
+
+# PLOT 3: CAREER LENGTH DISTRIBUTION BY GENDER
+
+f.seasons <- f.career.length$n_seasons
+m.seasons <- m.career.length$n_seasons
+
+# Set common breaks and x-axis limits
+breaks.range <- seq(min(c(f.seasons, m.seasons)) - 0.5, max(c(f.seasons, m.seasons)) + 0.5,
+                    by = 1)
+
+xlim.range <- range(breaks.range)
+ylim.max   <- max(hist(f.seasons, breaks = breaks.range, plot = FALSE)$counts,
+                  hist(m.seasons, breaks = breaks.range, plot = FALSE)$counts) * 1.1
+
+
+# Female histogram
+hist(f.seasons,
+     breaks = breaks.range,
+     main = "Career Length Distribution: Female Athletes",
+     xlab = "Number of Seasons", ylab = "Number of Athletes",
+     xlim = xlim.range, ylim = c(0, ylim.max),
+     col = "palevioletred", border = "white")
+
+# Male histogram
+hist(m.seasons,
+     breaks = breaks.range,
+     main = "Career Length Distribution: Male Athletes",
+     xlab = "Number of Seasons", ylab = "Number of Athletes",
+     xlim = xlim.range, ylim = c(0, ylim.max),
+     col = "cornflowerblue", border = "white")
+```
+More Summary Stats
+```{r}
+# ADDITIONAL SUMMARY STATISTICS: RACE TIMES AND SEASON BESTS
+
+# All recorded race times
+f.times.stats <- f.swim.data %>%
+  summarise(
+    mean = round(mean(TimeSeconds, na.rm = TRUE), 2),
+    median = round(median(TimeSeconds, na.rm = TRUE), 2),
+    sd = round(sd(TimeSeconds, na.rm = TRUE), 2),
+    min = round(min(TimeSeconds, na.rm = TRUE), 2),
+    max = round(max(TimeSeconds, na.rm = TRUE), 2))
+
+m.times.stats <- m.swim.data %>%
+  summarise(
+    mean = round(mean(TimeSeconds, na.rm = TRUE), 2),
+    median = round(median(TimeSeconds, na.rm = TRUE), 2),
+    sd = round(sd(TimeSeconds, na.rm = TRUE), 2),
+    min = round(min(TimeSeconds, na.rm = TRUE), 2),
+    max = round(max(TimeSeconds, na.rm = TRUE), 2))
+
+# Season best times
+f.sb.stats <- f.season.bests %>%
+  summarise(
+    mean = round(mean(season.best, na.rm = TRUE), 2),
+    median = round(median(season.best, na.rm = TRUE), 2),
+    sd = round(sd(season.best, na.rm = TRUE), 2),
+    min = round(min(season.best, na.rm = TRUE), 2),
+    max = round(max(season.best, na.rm = TRUE), 2))
+
+m.sb.stats <- m.season.bests %>%
+  summarise(
+    mean = round(mean(season.best, na.rm = TRUE), 2),
+    median = round(median(season.best, na.rm = TRUE), 2),
+    sd = round(sd(season.best, na.rm = TRUE), 2),
+    min = round(min(season.best, na.rm = TRUE), 2),
+    max = round(max(season.best, na.rm = TRUE), 2))
+
+print(f.times.stats)
+print(m.times.stats)
+print(f.sb.stats)
+print(m.sb.stats)
+```
+
+HYPOTHESIS TESTS
+```{r}
+# HYPOTHESIS TESTS
+
+# 1. Gender comparison at horizon 1
+# Two-sample t-test: female vs male log scores at H1
+female_ls_h1 <- results_logscore_clean.f[athletes_h3.f, 1]
+male_ls_h1 <- results_logscore_clean_m[athletes_h3.m, 1]
+
+gender_test <- t.test(female_ls_h1, male_ls_h1,
+                      alternative = "two.sided", var.equal = FALSE)
+cat("Gender comparison (H1):\n")
+print(gender_test)
+
+# 2. Gap vs No Gap at horizon 1
+# Female
+gap_ls_f <- results_logscore_clean.f[gap_athletes.f, 1]
+no_gap_ls_f <- results_logscore_clean.f[no_gap_athletes.f, 1]
+
+gap_test_f <- t.test(gap_ls_f, no_gap_ls_f,
+                     alternative = "two.sided", var.equal = FALSE)
+cat("\nFemale gap vs no gap (H1):\n")
+print(gap_test_f)
+
+# Male
+gap_ls_m <- results_logscore_clean_m[gap_athletes_m, 1]
+no_gap_ls_m <- results_logscore_clean_m[no_gap_athletes_m, 1]
+
+gap_test_m <- t.test(gap_ls_m, no_gap_ls_m,
+                     alternative = "two.sided", var.equal = FALSE)
+cat("\nMale gap vs no gap (H1):\n")
+print(gap_test_m)
+
+# 3. Early gap vs Late gap vs No gap at horizon 1
+# Female early/late/no gap ANOVA 
+no_gap_f_h3 <- intersect(which(!has_gap.f), athletes_h3.f)
+early_gap_f_h3 <- intersect(early_gap_f, athletes_h3.f)
+late_gap_f_h3 <- intersect(late_gap_f, athletes_h3.f)
+
+gap_df_f <- data.frame(
+  ls = c(results_logscore_clean.f[no_gap_f_h3, 1],
+            results_logscore_clean.f[early_gap_f_h3, 1],
+            results_logscore_clean.f[late_gap_f_h3, 1]),
+  group = c(rep("No Gap", length(no_gap_f_h3)),
+            rep("Early Gap", length(early_gap_f_h3)),
+            rep("Late Gap", length(late_gap_f_h3)))
+  )
+
+# Remove NAs together so vectors stay aligned
+gap_df_f <- gap_df_f[!is.na(gap_df_f$ls), ]
+
+cat("Female group sizes after NA removal:\n")
+print(table(gap_df_f$group))
+
+anova_gap_f <- aov(ls ~ factor(group), data = gap_df_f)
+cat("\nFemale early/late/no gap ANOVA (H1):\n")
+print(summary(anova_gap_f))
+cat("\nFemale post-hoc pairwise t-tests:\n")
+print(TukeyHSD(anova_gap_f))
+
+# Male early/late/no gap ANOVA
+gap_df_m <- data.frame(
+  ls = c(results_logscore_clean_m[no_gap_m_h3, 1],
+            results_logscore_clean_m[early_gap_m_h3, 1],
+            results_logscore_clean_m[late_gap_m_h3, 1]),
+  group = c(rep("No Gap", length(no_gap_m_h3)),
+            rep("Early Gap", length(early_gap_m_h3)),
+            rep("Late Gap", length(late_gap_m_h3)))
+)
+
+gap_df_m <- gap_df_m[!is.na(gap_df_m$ls), ]
+
+cat("Male group sizes after NA removal:\n")
+print(table(gap_df_m$group))
+
+anova_gap_m <- aov(ls ~ factor(group), data = gap_df_m)
+cat("\nMale early/late/no gap ANOVA (H1):\n")
+print(summary(anova_gap_m))
+cat("\nMale post-hoc pairwise t-tests:\n")
+print(TukeyHSD(anova_gap_m))
+
+# 4. Horizon comparison
+# Female: one-way ANOVA across horizons 1-6
+horizon_ls_f <- c()
+horizon_id_f <- c()
+for (h in 1:6) {
+  if (h <= 3) valid <- athletes_h3.f else valid <- athletes_h6.f
+  ls_h <- results_logscore_clean.f[valid, h]
+  ls_h <- ls_h[!is.na(ls_h)]
+  horizon_ls_f <- c(horizon_ls_f, ls_h)
+  horizon_id_f <- c(horizon_id_f, rep(h, length(ls_h)))
+}
+anova_horizon_f <- aov(horizon_ls_f ~ factor(horizon_id_f))
+cat("\nFemale horizon comparison ANOVA:\n")
+print(summary(anova_horizon_f))
+
+# Male: one-way ANOVA across horizons 1-6
+horizon_ls_m <- c()
+horizon_id_m <- c()
+for (h in 1:6) {
+  if (h <= 3) valid <- athletes_h3.m else valid <- athletes_h6.m
+  ls_h <- results_logscore_clean_m[valid, h]
+  ls_h <- ls_h[!is.na(ls_h)]
+  horizon_ls_m <- c(horizon_ls_m, ls_h)
+  horizon_id_m <- c(horizon_id_m, rep(h, length(ls_h)))
+}
+anova_horizon_m <- aov(horizon_ls_m ~ factor(horizon_id_m))
+cat("\nMale horizon comparison ANOVA:\n")
+print(summary(anova_horizon_m))
+
+# 5. Layer comparison at horizon 1
+# These would need the per-athlete layer log scores
+# assuming ls_l1, ls_l2, ls_l3 are stored from the layer comparison code
+layer_ls_f <- c(ls_l1, ls_l2, ls_l3)
+layer_id_f <- c(rep("Layer 1", length(ls_l1)),
+                rep("Layer 2", length(ls_l2)),
+                rep("Layer 3", length(ls_l3)))
+
+# Remove infinite values
+finite_idx <- is.finite(layer_ls_f)
+layer_ls_f <- layer_ls_f[finite_idx]
+layer_id_f <- layer_id_f[finite_idx]
+
+anova_layer_f <- aov(layer_ls_f ~ factor(layer_id_f))
+cat("\nLayer comparison ANOVA (female, H1):\n")
+print(summary(anova_layer_f))
+cat("\nLayer post-hoc pairwise t-tests:\n")
+print(TukeyHSD(anova_layer_f))
+```
+```{r}
+early_gap_f_h3 <- intersect(early_gap_f, athletes_h3.f)
+late_gap_f_h3  <- intersect(late_gap_f, athletes_h3.f)
+no_gap_f_h3    <- intersect(which(!has_gap.f), athletes_h3.f)
+
+cat("Female eligible group sizes:\n")
+cat("No gap:", length(no_gap_f_h3), "\n")
+cat("Early gap:", length(early_gap_f_h3), "\n")
+cat("Late gap:", length(late_gap_f_h3), "\n")
+
+gap_df_f <- data.frame(
+  ls = c(results_logscore_clean.f[no_gap_f_h3, 1],
+            results_logscore_clean.f[early_gap_f_h3, 1],
+            results_logscore_clean.f[late_gap_f_h3, 1]),
+  group = c(rep("No Gap", length(no_gap_f_h3)),
+            rep("Early Gap", length(early_gap_f_h3)),
+            rep("Late Gap", length(late_gap_f_h3)))
+)
+
+gap_df_f <- gap_df_f[!is.na(gap_df_f$ls), ]
+
+anova_gap_f <- aov(ls ~ factor(group), data = gap_df_f)
+cat("\nFemale early/late/no gap ANOVA (H1):\n")
+print(summary(anova_gap_f))
+cat("\nFemale post-hoc pairwise t-tests:\n")
+print(TukeyHSD(anova_gap_f))
+```
+
+```{r}
+# Rebuild early/late gap classification for males using calendar years
+early_gap_m <- c()
+late_gap_m  <- c()
+
+for (i in 1:100) {
+  if (!has_gap_m[i]) next
+  
+  years_competed <- sort(unique(m.swim.data$Year[m.swim.data$athlete == i]))
+  all_years <- min(years_competed):max(years_competed)
+  gap_years <- setdiff(all_years, years_competed)
+  
+  if (length(gap_years) == 0) next
+  
+  late_gap <- any(gap_years >= (max(years_competed) - 3))
+  
+  if (late_gap) {
+    late_gap_m <- c(late_gap_m, i)
+  } else {
+    early_gap_m <- c(early_gap_m, i)
+  }
+}
+
+cat("Male early gap athletes:", length(early_gap_m), "\n")
+cat("Male late gap athletes:", length(late_gap_m), "\n")
+cat("Total gap athletes:", length(gap_athletes_m), "\n")
+
+# Intersect with eligible athletes
+early_gap_m_h3 <- intersect(early_gap_m, athletes_h3.m)
+late_gap_m_h3  <- intersect(late_gap_m, athletes_h3.m)
+no_gap_m_h3 <- intersect(which(!has_gap_m), athletes_h3.m)
+
+cat("\nMale eligible group sizes:\n")
+cat("No gap:", length(no_gap_m_h3), "\n")
+cat("Early gap:", length(early_gap_m_h3), "\n")
+cat("Late gap:", length(late_gap_m_h3), "\n")
+
+gap_df_m <- data.frame(
+  ls = c(results_logscore_clean_m[no_gap_m_h3, 1],
+            results_logscore_clean_m[early_gap_m_h3, 1],
+            results_logscore_clean_m[late_gap_m_h3, 1]),
+  group = c(rep("No Gap", length(no_gap_m_h3)),
+            rep("Early Gap", length(early_gap_m_h3)),
+            rep("Late Gap", length(late_gap_m_h3)))
+)
+
+gap_df_m <- gap_df_m[!is.na(gap_df_m$ls), ]
+
+anova_gap_m <- aov(ls ~ factor(group), data = gap_df_m)
+cat("\nMale early/late/no gap ANOVA (H1):\n")
+print(summary(anova_gap_m))
+cat("\nMale post-hoc pairwise t-tests:\n")
+print(TukeyHSD(anova_gap_m))
+
+```
+
+```{r}
+# Gap vs No Gap t-tests
+# Female
+gap_test_f <- t.test(
+  results_logscore_clean.f[gap_athletes.f, 1],
+  results_logscore_clean.f[no_gap_athletes.f, 1],
+  alternative = "two.sided", var.equal = FALSE)
+cat("Female gap vs no gap t-test (H1):\n")
+print(gap_test_f)
+
+# Male
+gap_test_m <- t.test(
+  results_logscore_clean_m[gap_athletes_m, 1],
+  results_logscore_clean_m[no_gap_athletes_m, 1],
+  alternative = "two.sided", var.equal = FALSE)
+cat("\nMale gap vs no gap t-test (H1):\n")
+print(gap_test_m)
+
+# Gender comparison at horizon 1
+gender_test <- t.test(
+  results_logscore_clean.f[athletes_h3.f, 1],
+  results_logscore_clean_m[athletes_h3.m, 1],
+  alternative = "two.sided", var.equal = FALSE)
+cat("\nGender comparison t-test (H1):\n")
+print(gender_test)
+
+# Horizon comparison
+# Female
+horizon_ls_f <- c()
+horizon_id_f <- c()
+for (h in 1:6) {
+  valid <- if (h <= 3) athletes_h3.f else athletes_h6.f
+  ls_h <- results_logscore_clean.f[valid, h]
+  ls_h <- ls_h[!is.na(ls_h)]
+  horizon_ls_f <- c(horizon_ls_f, ls_h)
+  horizon_id_f <- c(horizon_id_f, rep(h, length(ls_h)))
+}
+anova_horizon_f <- aov(horizon_ls_f ~ factor(horizon_id_f))
+cat("\nFemale horizon comparison ANOVA:\n")
+print(summary(anova_horizon_f))
+
+# Male
+horizon_ls_m <- c()
+horizon_id_m <- c()
+for (h in 1:6) {
+  valid <- if (h <= 3) athletes_h3.m else athletes_h6.m
+  ls_h <- results_logscore_clean_m[valid, h]
+  ls_h <- ls_h[!is.na(ls_h)]
+  horizon_ls_m <- c(horizon_ls_m, ls_h)
+  horizon_id_m <- c(horizon_id_m, rep(h, length(ls_h)))
+}
+anova_horizon_m <- aov(horizon_ls_m ~ factor(horizon_id_m))
+cat("\nMale horizon comparison ANOVA:\n")
+print(summary(anova_horizon_m))
+
+# Layer comparison
+layer_ls <- c(ls_l1, ls_l2, ls_l3)
+layer_id <- c(rep("Layer 1", length(ls_l1)),
+              rep("Layer 2", length(ls_l2)),
+              rep("Layer 3", length(ls_l3)))
+
+# Remove infinite values
+finite_idx <- is.finite(layer_ls)
+layer_ls <- layer_ls[finite_idx]
+layer_id <- layer_id[finite_idx]
+
+anova_layer <- aov(layer_ls ~ factor(layer_id))
+cat("\nLayer comparison ANOVA (H1):\n")
+print(summary(anova_layer))
+cat("\nLayer post-hoc pairwise t-tests:\n")
+print(TukeyHSD(anova_layer))
+```
+
+```{r}
+# Compute signed errors for female athletes
+results_signed_error.f <- results_median.f - matrix(
+  rep(actual_bests.f, 6), nrow = 100, ncol = 6)
+
+# Compute signed errors for male athletes  
+results_signed_error.m <- results_median - matrix(
+  rep(actual_bests, 6), nrow = 100, ncol = 6)
+
+# Mean signed error at each horizon
+cat("Female mean signed error by horizon:\n")
+for (h in 1:6) {
+  valid <- if (h <= 3) athletes_h3.f else athletes_h6.f
+  cat("Horizon", h, ":", 
+      round(mean(results_signed_error.f[valid, h], na.rm = TRUE), 3), "\n")
+}
+
+cat("\nMale mean signed error by horizon:\n")
+for (h in 1:6) {
+  valid <- if (h <= 3) athletes_h3.m else athletes_h6.m
+  cat("Horizon", h, ":", 
+      round(mean(results_signed_error.m[valid, h], na.rm = TRUE), 3), "\n")
+}
+```
+
+25m pool performances problem:
+```{r}
+# Check how many athletes have their season best in a 25m pool
+# Female
+f.season.bests.50m <- f.swim.data %>%
+  filter(Pool25m == 0) %>%
+  group_by(athlete, Season) %>%
+  summarise(season.best.50m = min(TimeSeconds, na.rm = TRUE), .groups = "drop")
+
+# Check if any athlete's overall season best differs from their 50m season best
+f.season.bests.all <- f.swim.data %>%
+  group_by(athlete, Season) %>%
+  summarise(season.best.all = min(TimeSeconds, na.rm = TRUE), .groups = "drop")
+
+f.check <- f.season.bests.50m %>%
+  left_join(f.season.bests.all, by = c("athlete", "Season")) %>%
+  mutate(differs = season.best.50m != season.best.all)
+
+cat("Female athlete-seasons where season best is in 25m pool:",
+    sum(f.check$differs, na.rm = TRUE), "\n")
+
+# Male
+m.season.bests.50m <- m.swim.data %>%
+  filter(Pool25m == 0) %>%
+  group_by(athlete, Season) %>%
+  summarise(season.best.50m = min(TimeSeconds, na.rm = TRUE), .groups = "drop")
+
+m.season.bests.all <- m.swim.data %>%
+  group_by(athlete, Season) %>%
+  summarise(season.best.all = min(TimeSeconds, na.rm = TRUE), .groups = "drop")
+
+m.check <- m.season.bests.50m %>%
+  left_join(m.season.bests.all, by = c("athlete", "Season")) %>%
+  mutate(differs = season.best.50m != season.best.all)
+
+cat("Male athlete-seasons where season best is in 25m pool:",
+    sum(m.check$differs, na.rm = TRUE), "\n")
+
+
+# Total athlete-seasons
+cat("Total female athlete-seasons:", 
+    nrow(f.season.bests.all), "\n")
+cat("Female athlete-seasons with 25m season best:", 
+    sum(f.check$differs, na.rm = TRUE), "\n")
+cat("Proportion:", 
+    round(sum(f.check$differs, na.rm = TRUE) / nrow(f.season.bests.all), 3), "\n")
+
+cat("\nTotal male athlete-seasons:", 
+    nrow(m.season.bests.all), "\n")
+cat("Male athlete-seasons with 25m season best:", 
+    sum(m.check$differs, na.rm = TRUE), "\n")
+cat("Proportion:", 
+    round(sum(m.check$differs, na.rm = TRUE) / nrow(m.season.bests.all), 3), "\n")
+
+# Also check specifically for the held-out final seasons
+# Female
+f.final.seasons <- sapply(1:100, function(i) max(season.f[[i]]))
+f.final.check <- f.check %>%
+  filter(athlete %in% athletes_h3.f) %>%
+  group_by(athlete) %>%
+  filter(Season == max(Season)) %>%
+  ungroup()
+
+cat("\nFemale athletes whose held-out season best is in 25m pool:",
+    sum(f.final.check$differs, na.rm = TRUE), "\n")
+
+# Male
+m.final.check <- m.check %>%
+  filter(athlete %in% athletes_h3.m) %>%
+  group_by(athlete) %>%
+  filter(Season == max(Season)) %>%
+  ungroup()
+
+cat("Male athletes whose held-out season best is in 25m pool:",
+    sum(m.final.check$differs, na.rm = TRUE), "\n")
+
+
+
+# For the affected female athletes, compare 25m and 50m season bests
+# in their held-out season
+affected_f <- f.final.check$athlete[f.final.check$differs == TRUE]
+
+for (i in affected_f) {
+  n_s <- max(season.f[[i]])
+  best_all <- min(target.f[[i]][season.f[[i]] == n_s])
+  best_50m <- min(f.swim.data$TimeSeconds[
+    f.swim.data$athlete == i & 
+    f.swim.data$Season == n_s & 
+    f.swim.data$Pool25m == 0], na.rm = TRUE)
+  cat("Athlete", i, "- 25m best:", round(best_all, 3), 
+      "50m best:", round(best_50m, 3),
+      "difference:", round(best_50m - best_all, 3), "\n")
+}
+```
+recompute season bests bbut for 50m pools only
+```{r}
+# Recompute evaluation using 50m only season bests
+results_error_50m.f <- matrix(NA, nrow = 100, ncol = 6)
+results_logscore_50m.f <- matrix(NA, nrow = 100, ncol = 6)
+results_coverage_50m.f <- matrix(NA, nrow = 100, ncol = 6)
+results_median_50m.f <- matrix(NA, nrow = 100, ncol = 6)
+
+for (i in athletes_h3.f) {
+  if (is.na(actual_bests_50m.f[i])) next
+  
+  actual <- actual_bests_50m.f[i]
+  max_h  <- ifelse(season_counts.f[i] >= 8, 6, 3)
+  
+  for (h in 1:max_h) {
+    pred <- pred_samples_all_f[, i, h]
+    pred <- pred[is.finite(pred)]
+    if (length(pred) == 0) next
+    
+    results_median_50m.f[i, h] <- median(pred)
+    results_error_50m.f[i, h] <- abs(median(pred) - actual)
+    results_logscore_50m.f[i, h] <- log_score(pred, actual)
+    results_coverage_50m.f[i, h] <- actual >= quantile(pred, 0.025) &
+                                     actual <= quantile(pred, 0.975)
+  }
+}
+
+# Clean infinite log scores
+results_logscore_50m_clean.f <- results_logscore_50m.f
+results_logscore_50m_clean.f[is.infinite(results_logscore_50m_clean.f)] <- NA
+
+# Compare results at each horizon
+cat("Female results comparison (original vs 50m only):\n")
+cat(sprintf("%-10s %-15s %-15s %-15s %-15s\n", 
+    "Horizon", "Error (orig)", "Error (50m)", "LS (orig)", "LS (50m)"))
+
+for (h in 1:6) {
+  valid_orig <- if (h <= 3) athletes_h3.f else athletes_h6.f
+  valid_50m  <- valid_orig[!is.na(actual_bests_50m.f[valid_orig])]
+  
+  cat(sprintf("%-10d %-15.3f %-15.3f %-15.3f %-15.3f\n",
+    h,
+    mean(abs(results_error.f[valid_orig, h]), na.rm = TRUE),
+    mean(results_error_50m.f[valid_50m, h], na.rm = TRUE),
+    mean(results_logscore_clean.f[valid_orig, h], na.rm = TRUE),
+    mean(results_logscore_50m_clean.f[valid_50m, h], na.rm = TRUE)))
+}
+
+
+# Recompute actual 50m season bests for males
+actual_bests_50m.m <- rep(NA, 100)
+for (i in 1:100) {
+  n_s <- max(season.m[[i]])
+  best_50m <- min(m.swim.data$TimeSeconds[
+    m.swim.data$athlete == i &
+    m.swim.data$Season == n_s &
+    m.swim.data$Pool25m == 0], na.rm = TRUE)
+  if (is.finite(best_50m)) {
+    actual_bests_50m.m[i] <- best_50m
+  } else {
+    cat("Athlete", i, "has no 50m performances in held-out season\n")
+  }
+}
+
+cat("Male athletes with no 50m performances in held-out season:",
+    sum(is.na(actual_bests_50m.m)), "\n")
+
+# Recompute evaluation using 50m only season bests
+results_error_50m.m <- matrix(NA, nrow = 100, ncol = 6)
+results_logscore_50m.m <- matrix(NA, nrow = 100, ncol = 6)
+results_coverage_50m.m <- matrix(NA, nrow = 100, ncol = 6)
+results_median_50m.m <- matrix(NA, nrow = 100, ncol = 6)
+
+for (i in athletes_h3.m) {
+  if (is.na(actual_bests_50m.m[i])) next
+  
+  actual <- actual_bests_50m.m[i]
+  max_h  <- ifelse(season_counts[i] >= 8, 6, 3)
+  
+  for (h in 1:max_h) {
+    pred <- pred_samples_all_m[, i, h]
+    pred <- pred[is.finite(pred)]
+    if (length(pred) == 0) next
+    
+    results_median_50m.m[i, h] <- median(pred)
+    results_error_50m.m[i, h] <- abs(median(pred) - actual)
+    results_logscore_50m.m[i, h] <- log_score(pred, actual)
+    results_coverage_50m.m[i, h] <- actual >= quantile(pred, 0.025) &
+                                     actual <= quantile(pred, 0.975)
+  }
+}
+
+# Clean infinite log scores
+results_logscore_50m_clean.m <- results_logscore_50m.m
+results_logscore_50m_clean.m[is.infinite(results_logscore_50m_clean.m)] <- NA
+
+# Compare results
+cat("\nMale results comparison (original vs 50m only):\n")
+cat(sprintf("%-10s %-15s %-15s %-15s %-15s\n",
+    "Horizon", "Error (orig)", "Error (50m)", "LS (orig)", "LS (50m)"))
+
+for (h in 1:6) {
+  valid_orig <- if (h <= 3) athletes_h3.m else athletes_h6.m
+  valid_50m  <- valid_orig[!is.na(actual_bests_50m.m[valid_orig])]
+  
+  cat(sprintf("%-10d %-15.3f %-15.3f %-15.3f %-15.3f\n",
+    h,
+    mean(abs(results_error[valid_orig, h]), na.rm = TRUE),
+    mean(results_error_50m.m[valid_50m, h], na.rm = TRUE),
+    mean(results_logscore_clean_m[valid_orig, h], na.rm = TRUE),
+    mean(results_logscore_50m_clean.m[valid_50m, h], na.rm = TRUE)))
+}
+
+
+# Female coverage at each horizon using 50m bests
+cat("Female coverage (50m only):\n")
+for (h in 1:6) {
+  valid_50m <- if (h <= 3) athletes_h3.f else athletes_h6.f
+  valid_50m <- valid_50m[!is.na(actual_bests_50m.f[valid_50m])]
+  cat("Horizon", h, ":", 
+      round(mean(results_coverage_50m.f[valid_50m, h], na.rm=TRUE), 3), "\n")
+}
+
+# Male coverage at each horizon using 50m bests
+cat("\nMale coverage (50m only):\n")
+for (h in 1:6) {
+  valid_50m <- if (h <= 3) athletes_h3.m else athletes_h6.m
+  valid_50m <- valid_50m[!is.na(actual_bests_50m.m[valid_50m])]
+  cat("Horizon", h, ":",
+      round(mean(results_coverage_50m.m[valid_50m, h], na.rm=TRUE), 3), "\n")
+}
+
+# Also recompute naive baselines using 50m bests
+naive_log_score_50m <- function(athlete_idx, target_season, gender = "f") {
+  if (gender == "f") {
+    sb <- f.season.bests.50m %>%
+      filter(athlete == athlete_idx, Season < target_season) %>%
+      pull(season.best.50m)
+    actual <- actual_bests_50m.f[athlete_idx]
+  } else {
+    sb <- m.season.bests.50m %>%
+      filter(athlete == athlete_idx, Season < target_season) %>%
+      pull(season.best.50m)
+    actual <- actual_bests_50m.m[athlete_idx]
+  }
+  if (length(sb) < 2 || is.na(actual)) return(NA)
+  mu  <- mean(sb, na.rm = TRUE)
+  sig <- sd(sb, na.rm = TRUE)
+  if (is.na(sig) || sig == 0) return(NA)
+  -dnorm(actual, mu, sig, log = TRUE)
+}
+
+# Female naive baseline
+naive_50m.f <- sapply(athletes_h3.f, function(i) {
+  naive_log_score_50m(i, n_seasons_all.f[i], gender = "f")
+})
+cat("\nFemale naive baseline (50m):", 
+    round(mean(naive_50m.f, na.rm = TRUE), 3), "\n")
+
+# Male naive baseline
+naive_50m.m <- sapply(athletes_h3.m, function(i) {
+  naive_log_score_50m(i, n_seasons_all[i], gender = "m")
+})
+cat("Male naive baseline (50m):", 
+    round(mean(naive_50m.m, na.rm = TRUE), 3), "\n")
+```
+
+```{r}
+# Female: exclude athletes whose held-out season best was in 25m pool
+affected_f <- f.final.check$athlete[f.final.check$differs == TRUE]
+unaffected_h3.f <- athletes_h3.f[!athletes_h3.f %in% affected_f]
+unaffected_h6.f <- athletes_h6.f[!athletes_h6.f %in% affected_f]
+
+cat("Female eligible athletes after exclusion:\n")
+cat("Horizons 1-3:", length(unaffected_h3.f), "\n")
+cat("Horizons 4-6:", length(unaffected_h6.f), "\n")
+
+# Recompute summary statistics for unaffected athletes
+cat("\nFemale results (excluding 25m held-out season best athletes):\n")
+cat(sprintf("%-10s %-15s %-15s %-15s\n",
+    "Horizon", "Mean Error", "Coverage", "Mean LS"))
+
+for (h in 1:6) {
+  valid <- if (h <= 3) unaffected_h3.f else unaffected_h6.f
+  valid <- valid[!is.na(results_logscore_clean.f[valid, h])]
+  cat(sprintf("%-10d %-15.3f %-15.3f %-15.3f\n",
+    h,
+    mean(results_error.f[valid, h], na.rm=TRUE),
+    mean(results_coverage.f[valid, h], na.rm=TRUE),
+    mean(results_logscore_clean.f[valid, h], na.rm=TRUE)))
+}
+
+# Male: exclude athletes whose held-out season best was in 25m pool
+affected_m <- m.final.check$athlete[m.final.check$differs == TRUE]
+unaffected_h3.m <- athletes_h3.m[!athletes_h3.m %in% affected_m]
+unaffected_h6.m <- athletes_h6.m[!athletes_h6.m %in% affected_m]
+
+cat("\nMale eligible athletes after exclusion:\n")
+cat("Horizons 1-3:", length(unaffected_h3.m), "\n")
+cat("Horizons 4-6:", length(unaffected_h6.m), "\n")
+
+cat("\nMale results (excluding 25m held-out season best athletes):\n")
+cat(sprintf("%-10s %-15s %-15s %-15s\n",
+    "Horizon", "Mean Error", "Coverage", "Mean LS"))
+
+for (h in 1:6) {
+  valid <- if (h <= 3) unaffected_h3.m else unaffected_h6.m
+  valid <- valid[!is.na(results_logscore_clean_m[valid, h])]
+  cat(sprintf("%-10d %-15.3f %-15.3f %-15.3f\n",
+    h,
+    mean(results_error[valid, h], na.rm=TRUE),
+    mean(results_coverage[valid, h], na.rm=TRUE),
+    mean(results_logscore_clean_m[valid, h], na.rm=TRUE)))
+}
+```
+```{r}
+# ALL UPDATED NUMBERS FOR REPORT
+
+# Gap year analyses for unaffected athletes
+# Female
+unaffected_gap.f <- intersect(gap_athletes.f, unaffected_h3.f)
+unaffected_no_gap.f <- intersect(no_gap_athletes.f, unaffected_h3.f)
+
+cat("Female gap athletes (unaffected):", length(unaffected_gap.f), "\n")
+cat("Female no gap athletes (unaffected):", length(unaffected_no_gap.f), "\n")
+cat("Female gap mean error H1:", 
+    round(mean(results_error.f[unaffected_gap.f, 1], na.rm=TRUE), 3), "\n")
+cat("Female no gap mean error H1:", 
+    round(mean(results_error.f[unaffected_no_gap.f, 1], na.rm=TRUE), 3), "\n")
+cat("Female gap mean LS H1:", 
+    round(mean(results_logscore_clean.f[unaffected_gap.f, 1], na.rm=TRUE), 3), "\n")
+cat("Female no gap mean LS H1:", 
+    round(mean(results_logscore_clean.f[unaffected_no_gap.f, 1], na.rm=TRUE), 3), "\n")
+
+# Male
+unaffected_gap.m <- intersect(gap_athletes_m, unaffected_h3.m)
+unaffected_no_gap.m <- intersect(no_gap_athletes_m, unaffected_h3.m)
+
+cat("\nMale gap athletes (unaffected):", length(unaffected_gap.m), "\n")
+cat("Male no gap athletes (unaffected):", length(unaffected_no_gap.m), "\n")
+cat("Male gap mean error H1:", 
+    round(mean(results_error[unaffected_gap.m, 1], na.rm=TRUE), 3), "\n")
+cat("Male no gap mean error H1:", 
+    round(mean(results_error[unaffected_no_gap.m, 1], na.rm=TRUE), 3), "\n")
+cat("Male gap mean LS H1:", 
+    round(mean(results_logscore_clean_m[unaffected_gap.m, 1], na.rm=TRUE), 3), "\n")
+cat("Male no gap mean LS H1:", 
+    round(mean(results_logscore_clean_m[unaffected_no_gap.m, 1], na.rm=TRUE), 3), "\n")
+
+# Gap timing analysis
+unaffected_early_f <- intersect(early_gap_f_h3, unaffected_h3.f)
+unaffected_late_f <- intersect(late_gap_f_h3, unaffected_h3.f)
+unaffected_nogap_f <- intersect(no_gap_f_h3, unaffected_h3.f)
+
+cat("\nFemale gap timing groups (unaffected):\n")
+cat("No gap:", length(unaffected_nogap_f), 
+    "LS:", round(mean(results_logscore_clean.f[unaffected_nogap_f, 1], na.rm=TRUE), 3), "\n")
+cat("Early gap:", length(unaffected_early_f),
+    "LS:", round(mean(results_logscore_clean.f[unaffected_early_f, 1], na.rm=TRUE), 3), "\n")
+cat("Late gap:", length(unaffected_late_f),
+    "LS:", round(mean(results_logscore_clean.f[unaffected_late_f, 1], na.rm=TRUE), 3), "\n")
+
+unaffected_early_m <- intersect(early_gap_m_h3, unaffected_h3.m)
+unaffected_late_m <- intersect(late_gap_m_h3, unaffected_h3.m)
+unaffected_nogap_m <- intersect(no_gap_m_h3, unaffected_h3.m)
+
+cat("\nMale gap timing groups (unaffected):\n")
+cat("No gap:", length(unaffected_nogap_m),
+    "LS:", round(mean(results_logscore_clean_m[unaffected_nogap_m, 1], na.rm=TRUE), 3), "\n")
+cat("Early gap:", length(unaffected_early_m),
+    "LS:", round(mean(results_logscore_clean_m[unaffected_early_m, 1], na.rm=TRUE), 3), "\n")
+cat("Late gap:", length(unaffected_late_m),
+    "LS:", round(mean(results_logscore_clean_m[unaffected_late_m, 1], na.rm=TRUE), 3), "\n")
+
+# Signed errors
+cat("\nFemale signed errors by horizon (unaffected):\n")
+for (h in 1:6) {
+  valid <- if (h <= 3) unaffected_h3.f else unaffected_h6.f
+  signed <- results_median.f[valid, h] - actual_bests.f[valid]
+  cat("Horizon", h, ":", round(mean(signed, na.rm=TRUE), 3), "\n")
+}
+
+cat("\nMale signed errors by horizon (unaffected):\n")
+for (h in 1:6) {
+  valid <- if (h <= 3) unaffected_h3.m else unaffected_h6.m
+  signed <- results_median[valid, h] - actual_bests[valid]
+  cat("Horizon", h, ":", round(mean(signed, na.rm=TRUE), 3), "\n")
+}
+
+# Hypothesis tests
+# Gender comparison
+gender_test_new <- t.test(
+  results_logscore_clean.f[unaffected_h3.f, 1],
+  results_logscore_clean_m[unaffected_h3.m, 1],
+  alternative = "two.sided", var.equal = FALSE)
+cat("\nGender comparison t-test (unaffected, H1):\n")
+print(gender_test_new)
+
+# Gap vs no gap
+gap_test_f_new <- t.test(
+  results_logscore_clean.f[unaffected_gap.f, 1],
+  results_logscore_clean.f[unaffected_no_gap.f, 1],
+  alternative = "two.sided", var.equal = FALSE)
+cat("\nFemale gap vs no gap t-test (unaffected, H1):\n")
+print(gap_test_f_new)
+
+gap_test_m_new <- t.test(
+  results_logscore_clean_m[unaffected_gap.m, 1],
+  results_logscore_clean_m[unaffected_no_gap.m, 1],
+  alternative = "two.sided", var.equal = FALSE)
+cat("\nMale gap vs no gap t-test (unaffected, H1):\n")
+print(gap_test_m_new)
+
+# Horizon ANOVA
+horizon_ls_f_new <- c()
+horizon_id_f_new <- c()
+for (h in 1:6) {
+  valid <- if (h <= 3) unaffected_h3.f else unaffected_h6.f
+  ls_h <- results_logscore_clean.f[valid, h]
+  ls_h <- ls_h[!is.na(ls_h)]
+  horizon_ls_f_new <- c(horizon_ls_f_new, ls_h)
+  horizon_id_f_new <- c(horizon_id_f_new, rep(h, length(ls_h)))
+}
+anova_horizon_f_new <- aov(horizon_ls_f_new ~ factor(horizon_id_f_new))
+cat("\nFemale horizon ANOVA (unaffected):\n")
+print(summary(anova_horizon_f_new))
+
+horizon_ls_m_new <- c()
+horizon_id_m_new <- c()
+for (h in 1:6) {
+  valid <- if (h <= 3) unaffected_h3.m else unaffected_h6.m
+  ls_h <- results_logscore_clean_m[valid, h]
+  ls_h <- ls_h[!is.na(ls_h)]
+  horizon_ls_m_new <- c(horizon_ls_m_new, ls_h)
+  horizon_id_m_new <- c(horizon_id_m_new, rep(h, length(ls_h)))
+}
+anova_horizon_m_new <- aov(horizon_ls_m_new ~ factor(horizon_id_m_new))
+cat("\nMale horizon ANOVA (unaffected):\n")
+print(summary(anova_horizon_m_new))
+
+# Gap timing ANOVA
+gap_df_f_new <- data.frame(
+  ls = c(results_logscore_clean.f[unaffected_nogap_f, 1],
+            results_logscore_clean.f[unaffected_early_f, 1],
+            results_logscore_clean.f[unaffected_late_f,  1]),
+  group = c(rep("No Gap", length(unaffected_nogap_f)),
+            rep("Early Gap", length(unaffected_early_f)),
+            rep("Late Gap",  length(unaffected_late_f)))
+)
+gap_df_f_new <- gap_df_f_new[!is.na(gap_df_f_new$ls), ]
+anova_gap_f_new <- aov(ls ~ factor(group), data = gap_df_f_new)
+cat("\nFemale gap timing ANOVA (unaffected):\n")
+print(summary(anova_gap_f_new))
+
+gap_df_m_new <- data.frame(
+  ls = c(results_logscore_clean_m[unaffected_nogap_m, 1],
+            results_logscore_clean_m[unaffected_early_m, 1],
+            results_logscore_clean_m[unaffected_late_m,  1]),
+  group = c(rep("No Gap", length(unaffected_nogap_m)),
+            rep("Early Gap", length(unaffected_early_m)),
+            rep("Late Gap", length(unaffected_late_m)))
+)
+gap_df_m_new <- gap_df_m_new[!is.na(gap_df_m_new$ls), ]
+anova_gap_m_new <- aov(ls ~ factor(group), data = gap_df_m_new)
+cat("\nMale gap timing ANOVA (unaffected):\n")
+print(summary(anova_gap_m_new))
+```
+```{r}
+# Coverage at each nominal level by horizon - female unaffected
+cat("Female coverage by horizon (unaffected):\n")
+for (h in 1:6) {
+  valid <- if (h <= 3) unaffected_h3.f else unaffected_h6.f
+  cat("Horizon", h, ":", 
+      round(mean(results_coverage.f[valid, h], na.rm=TRUE), 3), "\n")
+}
+
+cat("\nMale coverage by horizon (unaffected):\n")
+for (h in 1:6) {
+  valid <- if (h <= 3) unaffected_h3.m else unaffected_h6.m
+  cat("Horizon", h, ":", 
+      round(mean(results_coverage[valid, h], na.rm=TRUE), 3), "\n")
+}
+
+# Detailed coverage tables
+cat("\nFemale detailed coverage (unaffected):\n")
+for (h in 1:6) {
+  valid <- if (h <= 3) unaffected_h3.f else unaffected_h6.f
+  cov <- sapply(c(0.5, 0.6, 0.7, 0.8, 0.9, 0.95), function(q) {
+    mean(actual_bests.f[valid] >= results_median.f[valid, h] - 
+           apply(pred_samples_all_f[, valid, h], 2, 
+                 function(x) diff(quantile(x, c((1-q)/2, 1-(1-q)/2)))/2) &
+         actual_bests.f[valid] <= results_median.f[valid, h] + 
+           apply(pred_samples_all_f[, valid, h], 2,
+                 function(x) diff(quantile(x, c((1-q)/2, 1-(1-q)/2)))/2),
+         na.rm=TRUE)
+  })
+  cat("H", h, ":", round(cov, 3), "\n")
+}
+
+cat("\nMale detailed coverage (unaffected):\n")
+for (h in 1:6) {
+  valid <- if (h <= 3) unaffected_h3.m else unaffected_h6.m
+  cov <- sapply(c(0.5, 0.6, 0.7, 0.8, 0.9, 0.95), function(q) {
+    mean(actual_bests[valid] >= results_median[valid, h] - 
+           apply(pred_samples_all_m[, valid, h], 2, 
+                 function(x) diff(quantile(x, c((1-q)/2, 1-(1-q)/2)))/2) &
+         actual_bests[valid] <= results_median[valid, h] + 
+           apply(pred_samples_all_m[, valid, h], 2,
+                 function(x) diff(quantile(x, c((1-q)/2, 1-(1-q)/2)))/2),
+         na.rm=TRUE)
+  })
+  cat("H", h, ":", round(cov, 3), "\n")
+}
+
+
+# Updated log score degradation by career continuity
+cat("Female log scores by horizon and continuity (unaffected):\n")
+cat(sprintf("%-10s %-10s %-10s %-10s\n", "Horizon", "All", "Gap", "No Gap"))
+for (h in 1:6) {
+  valid_all  <- if (h <= 3) unaffected_h3.f else unaffected_h6.f
+  valid_gap  <- intersect(unaffected_gap.f, valid_all)
+  valid_nogap <- intersect(unaffected_no_gap.f, valid_all)
+  cat(sprintf("%-10d %-10.3f %-10.3f %-10.3f\n",
+    h,
+    mean(results_logscore_clean.f[valid_all, h], na.rm=TRUE),
+    mean(results_logscore_clean.f[valid_gap, h], na.rm=TRUE),
+    mean(results_logscore_clean.f[valid_nogap, h], na.rm=TRUE)))
+}
+
+cat("\nMale log scores by horizon and continuity (unaffected):\n")
+cat(sprintf("%-10s %-10s %-10s %-10s\n", "Horizon", "All", "Gap", "No Gap"))
+for (h in 1:6) {
+  valid_all  <- if (h <= 3) unaffected_h3.m else unaffected_h6.m
+  valid_gap  <- intersect(unaffected_gap.m, valid_all)
+  valid_nogap <- intersect(unaffected_no_gap.m, valid_all)
+  cat(sprintf("%-10d %-10.3f %-10.3f %-10.3f\n",
+    h,
+    mean(results_logscore_clean_m[valid_all, h], na.rm=TRUE),
+    mean(results_logscore_clean_m[valid_gap, h], na.rm=TRUE),
+    mean(results_logscore_clean_m[valid_nogap, h], na.rm=TRUE)))
+}
+```
+```{r}
+# Recompute layer calibration for unaffected athletes
+nominal_levels <- c(0.5, 0.6, 0.7, 0.8, 0.9, 0.95)
+
+coverage_layers_unaffected.f <- matrix(NA, nrow = 3, ncol = 6)
+coverage_layers_unaffected.m <- matrix(NA, nrow = 3, ncol = 6)
+
+for (l in 1:3) {
+  for (q_idx in 1:6) {
+    q <- nominal_levels[q_idx]
+    lo <- (1 - q) / 2
+    hi <- 1 - lo
+    
+    # Female
+    covered.f <- sapply(unaffected_h3.f, function(i) {
+      pred <- pred_samples_layers.f[, i, l]
+      pred <- pred[is.finite(pred)]
+      if (length(pred) == 0) return(NA)
+      actual <- actual_bests.f[i]
+      if (is.na(actual)) return(NA)
+      actual >= quantile(pred, lo) & actual <= quantile(pred, hi)
+    })
+    coverage_layers_unaffected.f[l, q_idx] <- mean(covered.f, na.rm=TRUE)
+    
+    # Male
+    covered.m <- sapply(unaffected_h3.m, function(i) {
+      pred <- pred_samples_layers_m[, i, l]
+      pred <- pred[is.finite(pred)]
+      if (length(pred) == 0) return(NA)
+      actual <- actual_bests[i]
+      if (is.na(actual)) return(NA)
+      actual >= quantile(pred, lo) & actual <= quantile(pred, hi)
+    })
+    coverage_layers_unaffected.m[l, q_idx] <- mean(covered.m, na.rm=TRUE)
+  }
+}
+
+cat("Female layer calibration (unaffected athletes):\n")
+cat("Nominal levels: 50% 60% 70% 80% 90% 95%\n")
+for (l in 1:3) {
+  cat(sprintf("Layer %d: %s\n", l,
+    paste(round(coverage_layers_unaffected.f[l,], 3), collapse=" ")))
+}
+
+cat("\nMale layer calibration (unaffected athletes):\n")
+cat("Nominal levels: 50% 60% 70% 80% 90% 95%\n")
+for (l in 1:3) {
+  cat(sprintf("Layer %d: %s\n", l,
+    paste(round(coverage_layers_unaffected.m[l,], 3), collapse=" ")))
+}
+
+# Also get the 95% level specifically for reporting in text
+cat("\nFemale 95% coverage by layer (unaffected):\n")
+cat("Layer 1:", round(coverage_layers_unaffected.f[1, 6], 3), "\n")
+cat("Layer 2:", round(coverage_layers_unaffected.f[2, 6], 3), "\n")
+cat("Layer 3:", round(coverage_layers_unaffected.f[3, 6], 3), "\n")
+
+cat("\nMale 95% coverage by layer (unaffected):\n")
+cat("Layer 1:", round(coverage_layers_unaffected.m[1, 6], 3), "\n")
+cat("Layer 2:", round(coverage_layers_unaffected.m[2, 6], 3), "\n")
+cat("Layer 3:", round(coverage_layers_unaffected.m[3, 6], 3), "\n")
+```
+
+```{r}
+# Original naive baseline restricted to unaffected athletes
+cat("Female naive baseline (original method, unaffected athletes):\n")
+cat(round(mean(naive_baselines.f[unaffected_h3.f], na.rm=TRUE), 3), "\n")
+
+cat("Male naive baseline (original method, unaffected athletes):\n")
+cat(round(mean(naive_baselines.m[unaffected_h3.m], na.rm=TRUE), 3), "\n")
+```
+
+```{r}
+# Correlation between career length and prediction error
+# Female - unaffected athletes only
+career_lengths_f <- season_counts.f[unaffected_h3.f]
+errors_f <- results_error.f[unaffected_h3.f, 1]
+valid_f <- !is.na(errors_f)
+cat("Female correlation (unaffected):", 
+    round(cor(career_lengths_f[valid_f], errors_f[valid_f]), 3), "\n")
+
+# Male - unaffected athletes only
+career_lengths_m <- season_counts[unaffected_h3.m]
+errors_m <- results_error[unaffected_h3.m, 1]
+valid_m <- !is.na(errors_m)
+cat("Male correlation (unaffected):", 
+    round(cor(career_lengths_m[valid_m], errors_m[valid_m]), 3), "\n")
+```
+

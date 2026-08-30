@@ -1,0 +1,2119 @@
+---
+title: "Women's Data"
+author: "Julie Hunter"
+date: "2026-08-07"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(dplyr)
+library(ggplot2)
+library(lubridate)
+library(coda)
+```
+
+Loading in the data and extracting a smaller set of athletes
+```{r}
+# Female 100m Freestyle Swimming Data
+f.swim.full.data <- read.csv("Swimming_Dist_100m_Female_Freestyle.csv", header = TRUE)
+
+# Extract the relevant columns 
+f.swim.data.1 <- dplyr::select(f.swim.full.data,
+                      PersonId = PersonId.x,
+                      TimeSeconds,
+                      ResultDate,
+                      Age = AthleteResultAge,
+                      PoolConfiguration,
+                      PhaseName,
+                      EventTypeName)
+
+# Find the top 100 athletes (with sufficient amount of data)
+  # First filter out the athletes with too few races (<15)
+f.valid <- f.swim.data.1 %>%
+              group_by(PersonId) %>%
+              summarise(n_obs = n()) %>%
+              filter(n_obs >= 15)
+
+  # Then find the top 100 athletes 
+f.pb.times <- f.swim.data.1 %>% 
+                group_by(PersonId) %>% # First find personal best times for each athlete
+                summarise(pb = min(TimeSeconds, na.rm = TRUE)) %>% 
+                inner_join(f.valid, by = "PersonId") %>%
+                arrange(pb) %>% # Then sort the pb times (fastest/best at the beginning)
+                slice_head(n = 100) # Then keep only the top 100 
+
+# Extract the data for the top 100 athletes
+  # First find the PersonId for the top 100 athletes
+f.top.100 <- f.pb.times$PersonId
+
+  # Then keep only the data for these top 100 athletes
+f.swim.data <- f.swim.data.1 %>%
+                  filter(PersonId %in% f.top.100)
+
+# Check to make sure each athlete has a sufficient amount of races
+f.counts <- f.swim.data %>%
+  group_by(PersonId) %>%
+  summarise(n_obs = n())
+
+
+# Change the PoolConfiguration variable to be a binary regressor
+f.swim.data <- f.swim.data %>%
+                  mutate(Pool25m = ifelse(PoolConfiguration == "25m", 1, 0))
+
+```
+
+Fitting the Model with Jim's Code
+```{r}
+# First we need to add/create some of the variables to the df
+
+# Season 
+  # First we need to find the first year of performance for each athlete
+f.swim.data <- f.swim.data %>%
+  mutate(Year = year(ResultDate))
+  # Then we can create a season variable in the df (season = 1 in the year of their first performance) 
+f.swim.data <- f.swim.data %>%
+  group_by(PersonId) %>%
+  arrange(ResultDate) %>%
+  mutate(
+    Season = dense_rank(year(ResultDate))
+  ) %>%
+  ungroup()
+
+# Times = The date of the performances within each season scaled to be between 0 and 1
+  # First we need the day of the performance
+f.swim.data <- f.swim.data %>%
+  mutate(DayOfYear = yday(ResultDate))
+  # Then scale within each season 
+f.swim.data <- f.swim.data %>%
+  group_by(Season) %>%
+  mutate(
+    Times = (DayOfYear - min(DayOfYear)) /
+            (max(DayOfYear) - min(DayOfYear))
+  ) %>%
+  ungroup()
+
+# Order the data properly 
+  # (by athlete, then by season for each athlete, then by date within each season)
+  # First create a numeric identifier for each athlete
+f.swim.data <- f.swim.data %>%
+  mutate(athlete = as.numeric(factor(PersonId)))
+
+f.swim.data <- f.swim.data %>%
+  arrange(athlete, Season, ResultDate)
+
+# Create all of our variables needed for the fit_model function
+
+# ages = Ages of all athletes
+ages.f  <- split(f.swim.data$Age, f.swim.data$athlete)
+
+# times = The date of the performances within each season scaled to be between 0 and 1
+times.f <- split(f.swim.data$Times, f.swim.data$athlete)
+
+# regressors_a = covariates for each performance
+  # First extract the pool indicators
+pool.f <- split(f.swim.data$Pool25m, f.swim.data$athlete)
+  # Then add the age polynomial
+mean_age <- mean(unlist(ages.f))
+degree <- 4
+  # Holder for the covariates
+regressors_a.f <- rep(list(), length(ages.f))
+for (i in seq_along(ages.f)) {
+  # create matrix of 1s with degree+2 columns 
+    # col 1: intercept (all 1s)
+  regressors_a.f[[i]] <- matrix(1, nrow = length(ages.f[[i]]), ncol = degree + 2)
+  # cols 2 to degree+1: polynomial terms (a - mean_age)^d
+  for (j in 1:degree) {   
+    regressors_a.f[[i]][, j + 1] <- (ages.f[[i]] - mean_age)^j
+  }
+  # col degree+2: pool indicator
+  regressors_a.f[[i]][, degree + 2] <- pool.f[[i]]
+}
+
+# target = Performances of all athletes
+target.f <- split(f.swim.data$TimeSeconds, f.swim.data$athlete)
+
+# season = Season of each performance
+season.f <- split(f.swim.data$Season, f.swim.data$athlete)
+
+# direction = direction of improvement
+  # Lower times = Better so performance improves by going down
+direction <- "negative"
+
+# MCMC Settings (tune these better later)
+  # burnin = number of burn-in iterations
+burnin <- 5000
+  # numbofits = number of collected samples
+numbofits <- 2000
+  # every = thinning and so the sampler is run for burnin + numbofits * every iterations in total
+every <- 10
+
+
+# Split everything by athlete
+ages.f <- split(f.swim.data$Age, f.swim.data$athlete)
+times.f <- split(f.swim.data$Times, f.swim.data$athlete)
+times.f <- lapply(times.f, function(x) {
+  pmin(pmax(x, 1e-6), 1 - 1e-6)
+})
+season.f <- split(f.swim.data$Season, f.swim.data$athlete)
+target.f <- split(f.swim.data$TimeSeconds, f.swim.data$athlete)
+
+
+source("fit_model.R")
+# fm.res <- fit_model(ages.f, times.f, regressors_a.f, target.f, season.f,
+                    #direction, burnin, numbofits, every)
+# Save the results
+#saveRDS(fm.res, "fm_res.rds")
+fm.res <- readRDS("fm_res.rds")
+
+```
+
+MCMC Convergence Check
+```{r}
+n_total <- length(fm.res$skew_alpha)  # Total number of iterations
+n_each  <- n_total / 2                # Number of iterations per chain (since fit_model() runs 2 chains)
+idx1  <- 1:n_each                     # Chain 1 indices
+idx2  <- (n_each + 1):n_total         # Chain 2 indices
+
+## Scalar parameters ##
+
+# Put all of the vector parameters into one matrix 
+scalar_params <- cbind(
+  skew_alpha = fm.res$skew_alpha,
+  nu1 = fm.res$nu1,
+  nu2 = fm.res$nu2,
+  nu_start = fm.res$nu_start,
+  nu_inc = fm.res$nu_inc,
+  sigmasq_inc = fm.res$sigmasq_inc,
+  sigmasq_rw3 = fm.res$sigmasq_rw_3,
+  sigmasq_start = fm.res$sigmasq_start,
+  sigmasqmu = fm.res$sigmasqmu,
+  sigmasqalpha = fm.res$sigmasqalpha
+  #lambda0 = fm.res$a_sigmasqbeta_t_ind,   
+  #lambda1 = fm.res$b_sigmasqbeta_t_ind,
+  #tau0 = fm.res$a_sigmasqbeta_ind,
+  #tau1 = fm.res$b_sigmasqbeta_ind
+)
+# scalar_params is [4000 x 10] -> we need to split it into the two chains
+chain1_scalar <- mcmc(scalar_params[idx1, ])
+chain2_scalar <- mcmc(scalar_params[idx2, ])
+chains_scalar <- mcmc.list(chain1_scalar, chain2_scalar)
+
+# PSRF and ESS for scalar parameters
+psrf_scalar <- gelman.diag(chains_scalar, multivariate = FALSE)
+ess_scalar <- effectiveSize(chains_scalar)
+
+print(psrf_scalar)
+print(ess_scalar)
+
+
+
+## Matrix parameters ##
+  # some parameters have different values for each athlete -> report worst case across rows (athletes)
+
+# Helper function:
+  # find the worst case across all athletes (high PSRF and low ESS) and report that
+diagnose_matrix_param <- function(mat, idx1, idx2, param_name) {
+  n_rows <- nrow(mat)          
+  psrf_vals <- rep(NA, n_rows)    # Holder for the PSRF value of each athlete
+  ess_vals <- rep(NA, n_rows)     # Holder for the ESS value of each athlete
+  
+  for (i in seq_len(n_rows)) {    
+    ch <- mcmc.list(
+      mcmc(mat[i, idx1]),         # Extract chain 1 for athlete i
+      mcmc(mat[i, idx2])          # Extract chain 2 for athlete i 
+    )                             # Then these are combined into an mcmc.list
+    psrf_vals[i] <- gelman.diag(ch, multivariate = FALSE)$psrf[1, 1]    # Extract the point estimate of the PSRF value
+    ess_vals[i] <- min(effectiveSize(ch))
+  }
+  
+  cat(param_name, ": max PSRF =", round(max(psrf_vals), 3),
+      " | min ESS =", round(min(ess_vals), 0), "\n")
+  
+  return(list(max_psrf = max(psrf_vals), min_ess = min(ess_vals)))  # return just the "worst case" 
+}
+
+# Run for each matrix parameter
+diag_sigmasq <- diagnose_matrix_param(fm.res$sigmasq, idx1, idx2, "sigmasq")
+diag_sigmasqbeta <- diagnose_matrix_param(fm.res$sigmasqbeta, idx1, idx2, "sigmasqbeta")
+diag_sigmasqbeta_t <- diagnose_matrix_param(fm.res$sigmasqbeta_t, idx1, idx2, "sigmasqbeta_t")
+diag_beta_b <- diagnose_matrix_param(fm.res$beta_b, idx1, idx2, "beta_b")
+diag_beta_a <- diagnose_matrix_param(fm.res$beta_a, idx1, idx2, "beta_a")
+diag_tau2 <- diagnose_matrix_param(fm.res$sigmasqbeta_ind, idx1, idx2, "tau2_i")
+diag_lambda2 <- diagnose_matrix_param(fm.res$sigmasqbeta_t_ind, idx1, idx2, "lambda2_i")
+
+
+## beta_bi ##
+
+# This parameter is a list of 4000 and each element is [n_athletes x p_b] 
+  # but we need it to be [n_athletes x p_b x 4000]
+  # then we can extract one coefficient for one athlete across all iterations
+n_athletes <- nrow(fm.res$sigmasq)
+p_b <- nrow(fm.res$beta_b)
+
+# Create a holder (of the correct structure) for the beta_bi
+beta_bi_array <- array(NA, dim = c(n_athletes, p_b, n_total)) 
+
+# Fill the holder
+for (m in seq_len(n_total)) {                   # For each iteration m
+  beta_bi_array[, , m] <- fm.res$beta_bi[[m]]   # Take that iteration's matrix and put it into the 3rd dim of the holder
+}
+
+# Similar to above, need to find worse case across all athlete-coefficient combos and report that 
+  # Use similar method to the diagnose_matrix_param helper function 
+psrf_bi <- rep(NA, n_athletes * p_b)            # Holder for the PSRF values
+ess_bi <- rep(NA, n_athletes * p_b)             # Holder for the ESS values
+k <- 1
+for (i in seq_len(n_athletes)) {
+  for (j in seq_len(p_b)) {
+    ch <- mcmc.list(
+      mcmc(beta_bi_array[i, j, idx1]),
+      mcmc(beta_bi_array[i, j, idx2])
+    )
+    psrf_bi[k] <- gelman.diag(ch, multivariate = FALSE)$psrf[1, 1]
+    ess_bi[k] <- min(effectiveSize(ch))
+    k <- k + 1
+  }
+}
+cat("beta_bi: max PSRF =", round(max(psrf_bi), 3),
+    " | min ESS =", round(min(ess_bi), 0), "\n")
+
+
+## Create summary table ##
+
+diag_summary <- data.frame(
+  Parameter = c(                                     # Vector of all the parameter names 
+    "sigma^2_a", "sigma^2_m", "alpha", "zeta", 
+    "beta_{n,v}", "beta^(i)_{n,v}", #"beta^(i,s)_{n,v}",
+    "lambda^2_i", "c^2_{n,v}", "tau^2_i", "d^2_{n,v}", #"eta_{i,s}", 
+    "sigma^2_i", "sigma^2_mu", "sigma^2_eta",
+    "sigma^2_rw_3", "nu_1", "nu_2", "nu^mu", "nu^eta"),
+    #"lambda_0", "lambda_1", "tau_0", "tau_1" ),
+  Max_PSRF  = c(                                     # Vector of all the PSRF values
+    psrf_scalar$psrf["sigmasqalpha",  1],
+    psrf_scalar$psrf["sigmasqmu", 1],    
+    psrf_scalar$psrf["skew_alpha",   1],
+    diag_beta_a$max_psrf,
+    diag_beta_b$max_psrf,
+    max(psrf_bi),                                     # Just report the maximum PSRF of all the beta_bi 
+    #NA, 
+    diag_lambda2$max_psrf,
+    diag_sigmasqbeta_t$max_psrf,
+    diag_tau2$max_psrf,
+    diag_sigmasqbeta$max_psrf,
+    #NA,
+    diag_sigmasq$max_psrf,
+    psrf_scalar$psrf["sigmasq_start", 1],
+    psrf_scalar$psrf["sigmasq_inc", 1],
+    psrf_scalar$psrf["sigmasq_rw3", 1],
+    psrf_scalar$psrf["nu1", 1],
+    psrf_scalar$psrf["nu2", 1], 
+    psrf_scalar$psrf["nu_start", 1],
+    psrf_scalar$psrf["nu_inc", 1]),
+    #psrf_scalar$psrf["lambda0", 1],
+    #psrf_scalar$psrf["lambda1", 1],
+    #psrf_scalar$psrf["tau0", 1],
+    #psrf_scalar$psrf["tau1", 1]),
+  Min_ESS   = c(                                       # Vector of all the ESS values
+    ess_scalar["sigmasqalpha"],    
+    ess_scalar["sigmasqmu"],    
+    ess_scalar["skew_alpha"],
+    diag_beta_a$min_ess,
+    diag_beta_b$min_ess,
+    min(ess_bi),                                       # Just report the minimum ESS of all the beta_bi
+    #NA,
+    diag_lambda2$min_ess,
+    diag_sigmasqbeta_t$min_ess,
+    diag_tau2$min_ess,
+    diag_sigmasqbeta$min_ess,
+    #NA,
+    diag_sigmasq$min_ess,
+    ess_scalar["sigmasq_start"],
+    ess_scalar["sigmasq_inc"],
+    ess_scalar["sigmasq_rw3"],
+    ess_scalar["nu1"],
+    ess_scalar["nu2"],
+    ess_scalar["nu_start"],
+    ess_scalar["nu_inc"])
+    #ess_scalar["lambda0"],
+    #ess_scalar["lambda1"],
+    #ess_scalar["tau0"],
+    #ess_scalar["tau1"])
+)
+
+print(diag_summary)
+
+
+
+# Plot the first 500 iterations of chain 1 only
+# to see if the chain has actually stabilised by then
+par(mfrow = c(3, 2))
+plot(fm.res$skew_alpha[1:500],  type = "l", main = expression(alpha))
+plot(fm.res$nu1[1:500],         type = "l", main = expression(nu[1]))
+plot(fm.res$nu2[1:500],         type = "l", main = expression(nu[2]))
+plot(fm.res$sigmasq_inc[1:500], type = "l", main = expression(sigma[eta]^2))
+plot(fm.res$nu_start[1:500],    type = "l", main = expression(nu^mu))
+plot(fm.res$sigmasq[1, 1:500],  type = "l", main = "sigma^2 athlete 1")
+par(mfrow = c(1, 1))
+
+```
+
+Single Athlete Prediction - LAYER 1
+```{r}
+set.seed(111)
+
+#### LAYER 1 PREDICTION: g(a) only ####
+
+athlete_idx <- 1
+n_samples <- ncol(fm.res$beta_a)   # Number of MCMC samples 
+mean_age <- mean(unlist(ages.f))   # grand mean age used in fitting
+degree <- 4                        # degree of age polynomial
+
+# Identify held out (last) season 
+n_seasons <- length(unique(season.f[[athlete_idx]]))
+last_season_idx <- which(season.f[[athlete_idx]] == n_seasons)
+
+cat("Athlete", athlete_idx, "has", n_seasons, "seasons\n")
+cat("Performances in last season:", length(last_season_idx), "\n")
+
+# Actual (observed) values in last season
+actual_times_last <- target.f[[athlete_idx]][last_season_idx]
+actual_season_best <- min(actual_times_last)
+ages_last <- ages.f[[athlete_idx]][last_season_idx]
+
+cat("Actual times in last season:\n")
+print(actual_times_last)
+cat("Actual season best:", actual_season_best, "seconds\n")
+
+# Prediction loop
+  # For each MCMC sample, predict performance at each race in last season
+    # then take minimum as predicted season best
+
+  # Holder for the predicted values
+pred_l1_all <- matrix(NA, nrow = n_samples, ncol = length(last_season_idx))
+
+for (m in seq_len(n_samples)) {
+  
+  # Extract parameters for this MCMC sample
+  beta_a_m <- fm.res$beta_a[, m]   # matrix of coefficients for 
+                                      # [intercept, age^1, age^2, age^3, age^4, pool] for each sample m
+  
+  for (k in seq_along(last_season_idx)) {
+    age_k <- ages_last[k]      # raw age of performance k
+    age_c <- age_k - mean_age  # centered age of performance k
+    des_mat <- c(1, age_c, age_c^2, age_c^3, age_c^4)   #design matrix
+    pred_l1_all[m, k] <- as.numeric(des_mat %*% beta_a_m[1:5])  # predictions = design matrix * coefficients
+  }
+}
+
+# Predicted season best = minimum across races in last season
+pred_season_best_l1 <- apply(pred_l1_all, 1, min)
+
+# Summary
+cat("\n WOMEN'S ATHLETE", athlete_idx, "LAYER 1 RESULTS: \n")
+cat("Actual season best:", round(actual_season_best, 3), "seconds\n")
+cat("Predicted season best (median): ", round(median(pred_season_best_l1), 3), "seconds\n")
+cat("95% credible interval: [",
+    round(quantile(pred_season_best_l1, 0.025), 3), ",",
+    round(quantile(pred_season_best_l1, 0.975), 3), "]\n")
+cat("Actual inside 95% CI:",
+    actual_season_best >= quantile(pred_season_best_l1, 0.025) &
+    actual_season_best <= quantile(pred_season_best_l1, 0.975), "\n")
+cat("Absolute error:",
+    round(abs(median(pred_season_best_l1) - actual_season_best), 3), "seconds\n")
+
+# Plot
+hist(pred_season_best_l1,
+     breaks = 50,
+     main = "(W) Layer 1: Predicted Season Best (g(a) Only)",
+     xlab = "Predicted Time (Seconds)",
+     col = "steelblue", border = "white",
+     xlim = range(c(pred_season_best_l1, actual_season_best)))
+abline(v = actual_season_best,
+       col = "red", lwd = 2, lty = 1)
+abline(v = median(pred_season_best_l1),
+       col = "black", lwd = 2, lty = 2)
+abline(v = quantile(pred_season_best_l1, 0.025),
+       col = "darkgrey", lwd = 1, lty = 3)
+abline(v = quantile(pred_season_best_l1, 0.975),
+       col = "darkgrey", lwd = 1, lty = 3)
+legend("topleft",
+       legend = c("Actual Season Best", "Predicted Median", "95% CI Bounds"),
+       col = c("red", "black", "darkgrey"),
+       lty = c(1, 2, 3), lwd = 2, bty = "n")
+```
+
+Single Athlete Prediction - LAYER 2
+```{r}
+#### LAYER 2 PREDICTION: g(a) + individual RW trend ####
+
+# Create a function that extends F forward using a random walk
+extend_F <- function(F_curr, n_future, sigmasq_inc, sigmasq_rw_3) {
+  # F_curr = Season boundary values for athlete i from one MCMC sample (vector of length S+1)
+  # n_future = Number of seasons we are predicting ahead
+  # sigmasq_inc = Variance of the first increment of F 
+  # sigmasq_rw_3 = Variance of the second differences of F 
+  F_ext <- c(F_curr, rep(NA, n_future))    # Holder for the extended values
+  S <- length(F_curr)
+  
+  for (s in (S + 1):(S + n_future)) { 
+    if (s == 2) {
+      # first increment variance 
+        # only used when athlete has 1 observed season and we are predicting the 2nd season
+      F_ext[s] <- F_ext[s - 1] + rnorm(1, mean = 0, sd = sqrt(sigmasq_inc))   
+    } else {
+      # second-difference variance: 
+       # F[s] - 2*F[s-1] + F[s-2] ~ N(0, sigmasq_rw_3) => F[s] ~ N(2*F[s-1] - F[s-2], sigmasq_rw_3)
+      F_ext[s] <- 2 * F_ext[s - 1] - F_ext[s - 2] + rnorm(1, mean = 0, sd = sqrt(sigmasq_rw_3))
+    }
+  }
+  return(F_ext)
+}
+
+
+# Setup (same as Layer 1)
+athlete_idx <- 1
+n_samples <- ncol(fm.res$beta_a)
+mean_age <- mean(unlist(ages.f))
+degree <- 4                        
+
+# Last season info (same as Layer 1)
+n_seasons <- length(unique(season.f[[athlete_idx]]))
+last_season_idx <- which(season.f[[athlete_idx]] == n_seasons)
+actual_times_last <- target.f[[athlete_idx]][last_season_idx]
+actual_season_best <- min(actual_times_last)
+#pool_last <- regressors_a.f[[athlete_idx]][last_season_idx, 2]
+ages_last <- ages.f[[athlete_idx]][last_season_idx]
+z_last <- times.f[[athlete_idx]][last_season_idx]  # within-season positions of 
+                                                     # each performance in the last season
+
+# Prediction loop
+  # Holder for the predicted values 
+pred_l2_all <- matrix(NA, nrow = n_samples, ncol = length(last_season_idx))
+
+for (m in seq_len(n_samples)) {
+  
+  # Extract parameters for this MCMC sample
+  beta_a_m <- fm.res$beta_a[, m]
+  sigmasq_inc_m <- fm.res$sigmasq_inc[m]    # variance of the first increment
+  sigmasq_rw3_m <- fm.res$sigmasq_rw_3[m]   # variance of the second difference of F
+  
+  # Extract F values up to and including start of last season
+    # In case of Athlete 1: the "observed" boundaries are rows 1 to 9 (seasons 1-8)
+    # i.e. eta_{1,1} to eta_{1,9} (end of season 8)
+  F_observed <- fm.res$F[[athlete_idx]][1:n_seasons, m]
+  
+  # Extend F forward by 1 step 
+    # In case of Athlete 1: extend F forward from season 8 to get season 9 boundaries (to get eta_{1,10})
+  F_extended <- extend_F(F_observed, n_future = 1, sigmasq_inc = sigmasq_inc_m,
+                         sigmasq_rw_3 = sigmasq_rw3_m)
+  
+  # "Next" season boundary values (in case of Athlete 1: Season 9)
+  eta_start <- F_extended[n_seasons]       # in case of Athlete 1: eta_{1,9} = start of season 9
+  eta_end <- F_extended[n_seasons + 1]     # and eta_{1,10} = end of season 9
+  
+  for (k in seq_along(last_season_idx)) {
+    
+    # Layer 1 component: g(a)
+    age_k <- ages_last[k]
+    age_c <- age_k - mean_age
+    des_mat <- c(1, age_c, age_c^2, age_c^3, age_c^4)
+    layer1_k <- as.numeric(des_mat %*% beta_a_m[1:5])           # layer 1 prediction 
+    
+    # Layer 2 component: piecewise linear interpolation of F
+    z_k <- z_last[k]   # within-season position of this performance (between 0 and 1)
+    fi_z_k <- (1 - z_k) * eta_start + z_k * eta_end  # "trend excess performance trajectory"
+    
+    # Combined prediction = [g(a)] + [individual RW trend]
+    pred_l2_all[m, k] <- layer1_k + fi_z_k
+  }
+}
+
+# Predicted season best = minimum across performances in last season
+pred_season_best_l2 <- apply(pred_l2_all, 1, min)
+
+# Summary
+cat("\n WOMEN'S ATHLETE", athlete_idx, "LAYER 2 RESULTS \n")
+cat("Actual season best:", round(actual_season_best, 3), "seconds\n")
+cat("Predicted season best (median):", round(median(pred_season_best_l2), 3), "seconds\n")
+cat("95% credible interval: [",
+    round(quantile(pred_season_best_l2, 0.025), 3), ",",
+    round(quantile(pred_season_best_l2, 0.975), 3), "]\n")
+cat("Actual inside 95% CI:",
+    actual_season_best >= quantile(pred_season_best_l2, 0.025) &
+    actual_season_best <= quantile(pred_season_best_l2, 0.975), "\n")
+cat("Absolute error:", round(abs(median(pred_season_best_l2) - actual_season_best), 3), "seconds\n")
+
+# Compare Layer 1 vs Layer 2
+cat("\n COMPARISON OF LAYER 1 VS LAYER 2 \n")
+cat("Layer 1 absolute error:", 
+    round(abs(median(pred_season_best_l1) - actual_season_best), 3), "seconds\n")
+cat("Layer 2 absolute error:", 
+    round(abs(median(pred_season_best_l2) - actual_season_best), 3), "seconds\n")
+cat("Layer 1 CI width:", 
+    round(diff(quantile(pred_season_best_l1, c(0.025, 0.975))), 3), "seconds\n")
+cat("Layer 2 CI width:", 
+    round(diff(quantile(pred_season_best_l2, c(0.025, 0.975))), 3), "seconds\n")
+
+# Plot comparing Layer 1 and Layer 2
+par(mfrow = c(1, 2))
+
+hist(pred_season_best_l1,
+     breaks = 50, col = "plum", border = "white",
+     main = "(W) Layer 1: g(a) Only",
+     xlab = "Predicted Time (Seconds)", xlim = range(c(pred_season_best_l1, actual_season_best)))
+abline(v = actual_season_best, col = "red", lwd = 2)
+abline(v = median(pred_season_best_l1), col = "black", lwd = 2, lty = 2)
+abline(v = quantile(pred_season_best_l1, 0.025), col = "darkgrey", lwd = 1, lty = 3)
+abline(v = quantile(pred_season_best_l1, 0.975), col = "darkgrey", lwd = 1, lty = 3)
+
+hist(pred_season_best_l2,
+     breaks = 50, col = "seagreen", border = "white",
+     main = "(W) Layer 2: + Individual RW Trend",
+     xlab = "Predicted Time (Seconds)", xlim = range(c(pred_season_best_l2, actual_season_best)))
+abline(v = actual_season_best, col = "red", lwd = 2)
+abline(v = median(pred_season_best_l2), col = "black", lwd = 2, lty = 2)
+abline(v = quantile(pred_season_best_l2, 0.025), col = "darkgrey", lwd = 1, lty = 3)
+abline(v = quantile(pred_season_best_l2, 0.975), col = "darkgrey", lwd = 1, lty = 3)
+legend("topleft",
+       legend = c("Actual Season Best", "Predicted Median", "95% CI Bounds"),
+       col = c("red", "black", "darkgrey"),
+       lty = c(1, 2, 3), lwd = 2, bty = "n")
+
+```
+
+Single Athlete Prediction - LAYER 3
+```{r}
+#### LAYER 3 PREDICTION ####
+## full model -> g(a) + individual RW trend + within season shape
+
+# Setup (same as Layers 1 and 2)
+athlete_idx <- 1
+n_samples <- ncol(fm.res$beta_a)
+mean_age <- mean(unlist(ages.f))   
+degree <- 4                       
+p_b <- nrow(fm.res$beta_b)             # Number of RBP basis functions
+
+# Last season info (same as Layer 2)
+n_seasons <- length(unique(season.f[[athlete_idx]]))
+last_season_idx <- which(season.f[[athlete_idx]] == n_seasons)
+actual_times_last <- target.f[[athlete_idx]][last_season_idx]
+actual_season_best <- min(actual_times_last)
+ages_last <- ages.f[[athlete_idx]][last_season_idx]
+z_last <- times.f[[athlete_idx]][last_season_idx]
+
+# Construct the RBP for the within-season time points
+  # This is the same TruncBernstein function used in fit_model()
+b_last <- TruncBernstein(z_last, degree = 4)
+
+# Prediction loop
+  # Holder for the predicted values 
+pred_l3_all <- matrix(NA, nrow = n_samples, ncol = length(last_season_idx))
+
+for (m in seq_len(n_samples)) {
+  
+  # Extract parameters for this MCMC sample
+  beta_a_m <- fm.res$beta_a[, m]
+  sigmasq_inc_m <- fm.res$sigmasq_inc[m]
+  sigmasq_rw3_m <- fm.res$sigmasq_rw_3[m]
+  beta_bi_m <- fm.res$beta_bi[[m]][athlete_idx, ]                  # athlete-level RBP coefficients 
+  sigmasqbeta_t_m <- fm.res$sigmasqbeta_t[, m]                     # hyperparameter c^2
+  sigmasqbeta_t_ind_m <- fm.res$sigmasqbeta_t_ind[athlete_idx, m]  # lambda^2_i
+  
+  # Extend F forward (same as Layer 2)
+  F_observed <- fm.res$F[[athlete_idx]][1:n_seasons, m]
+  F_extended <- extend_F(F_observed, n_future = 1, sigmasq_inc = sigmasq_inc_m,
+                         sigmasq_rw_3 = sigmasq_rw3_m)
+  eta_start <- F_extended[n_seasons]
+  eta_end <- F_extended[n_seasons + 1]
+  
+  # Draw new within-season RBP coefficients for the predicted season
+    # beta_bit_new ~ N(beta_bi_i, lambda^2_i * c^2_{n,v})
+  beta_bit_new <- rnorm(p_b, mean = beta_bi_m, sd = sqrt(sigmasqbeta_t_ind_m * sigmasqbeta_t_m))
+  
+  # Evaluate within-season shape at each performance time point
+    # h*_{i,s}(z) = b_last * beta_bit_new
+  h_star <- as.numeric(b_last %*% beta_bit_new)   # length = n_performances = 5
+  
+  for (k in seq_along(last_season_idx)) {
+    
+    # Layer 1 component: g(a) only
+    age_k <- ages_last[k]
+    age_c <- age_k - mean_age
+    des_mat <- c(1, age_c, age_c^2, age_c^3, age_c^4)
+    layer1_k <- as.numeric(des_mat %*% beta_a_m[1:5])
+    
+    # Layer 2 component: piecewise linear interpolation of F
+    z_k <- z_last[k]
+    fi_z_k <- (1 - z_k) * eta_start + z_k * eta_end
+    
+    # Layer 3 component: within-season shape
+    h_star_k <- h_star[k]
+    
+    # Combined prediction = [g(a)] + [individual RW trend] + [within-season shape]
+    pred_l3_all[m, k] <- layer1_k + fi_z_k + h_star_k
+  }
+}
+
+# Predicted season best = minimum across performances in last season
+pred_season_best_l3 <- apply(pred_l3_all, 1, min)
+
+
+# Summary
+cat("\n WOMEN'S ATHLETE", athlete_idx, "LAYER 3 RESULTS \n")
+cat("Actual season best:", round(actual_season_best, 3), "seconds\n")
+cat("Predicted season best (median):", round(median(pred_season_best_l3), 3), "seconds\n")
+cat("95% credible interval: [",
+    round(quantile(pred_season_best_l3, 0.025), 3), ",",
+    round(quantile(pred_season_best_l3, 0.975), 3), "]\n")
+cat("Actual inside 95% CI:",
+    actual_season_best >= quantile(pred_season_best_l3, 0.025) &
+    actual_season_best <= quantile(pred_season_best_l3, 0.975), "\n")
+cat("Absolute error:", round(abs(median(pred_season_best_l3) - actual_season_best), 3), "seconds\n")
+
+# Full comparison across all three layers
+cat("\nFULL COMPARISON \n")
+cat(sprintf("%-10s %-10s %-10s %-10s %-10s\n", "Layer", "Median", "Error", "CI Width", "In CI?"))
+cat(sprintf("%-10s %-10f %-10f %-10f %-10s\n",
+            "Layer 1",
+            median(pred_season_best_l1),
+            abs(median(pred_season_best_l1) - actual_season_best),
+            diff(quantile(pred_season_best_l1, c(0.025, 0.975))),
+            actual_season_best >= quantile(pred_season_best_l1, 0.025) &
+            actual_season_best <= quantile(pred_season_best_l1, 0.975)))
+cat(sprintf("%-10s %-10f %-10f %-10f %-10s\n",
+            "Layer 2",
+            median(pred_season_best_l2),
+            abs(median(pred_season_best_l2) - actual_season_best),
+            diff(quantile(pred_season_best_l2, c(0.025, 0.975))),
+            actual_season_best >= quantile(pred_season_best_l2, 0.025) &
+            actual_season_best <= quantile(pred_season_best_l2, 0.975)))
+cat(sprintf("%-10s %-10f %-10f %-10f %-10s\n",
+            "Layer 3",
+            median(pred_season_best_l3),
+            abs(median(pred_season_best_l3) - actual_season_best),
+            diff(quantile(pred_season_best_l3, c(0.025, 0.975))),
+            actual_season_best >= quantile(pred_season_best_l3, 0.025) &
+            actual_season_best <= quantile(pred_season_best_l3, 0.975)))
+
+# Plot all three layers side by side
+par(mfrow = c(1, 3))
+
+hist(pred_season_best_l1,
+     breaks = 50, col = "plum", border = "white",
+     main = "(W) Layer 1:\ng(a)",
+     xlab = "Predicted time (seconds)", xlim = range(c(pred_season_best_l1,actual_season_best)))
+abline(v = actual_season_best, col = "red", lwd = 2)
+abline(v = median(pred_season_best_l1), col = "black", lwd = 2, lty = 2)
+abline(v = quantile(pred_season_best_l1, 0.025), col = "darkgrey", lwd = 1, lty = 3)
+abline(v = quantile(pred_season_best_l1, 0.975), col = "darkgrey", lwd = 1, lty = 3)
+legend("topleft",
+       legend = c("Actual Season Best", "Predicted Median", "95% CI Bounds"),
+       col = c("red", "black", "darkgrey"),
+       lty = c(1, 2, 3), lwd = 2, bty = "n", cex=0.7)
+
+hist(pred_season_best_l2,
+     breaks = 50, col = "seagreen", border = "white",
+     main = "(W) Layer 2:\n+ Individual RW Trend",
+     xlab = "Predicted Time (Seconds)", xlim = range(c(pred_season_best_l2,actual_season_best)))
+abline(v = actual_season_best, col = "red", lwd = 2)
+abline(v = median(pred_season_best_l2), col = "black",  lwd = 2, lty = 2)
+abline(v = quantile(pred_season_best_l2, 0.025), col = "darkgrey", lwd = 1, lty = 3)
+abline(v = quantile(pred_season_best_l2, 0.975), col = "darkgrey", lwd = 1, lty = 3)
+
+hist(pred_season_best_l3,
+     breaks = 50, col = "steelblue", border = "white",
+     main = "(W) Layer 3:\n+ Within-Season Shape",
+     xlab = "Predicted Time (Seconds)", xlim = range(c(pred_season_best_l3,actual_season_best)))
+abline(v = actual_season_best, col = "red", lwd = 2)
+abline(v = median(pred_season_best_l3), col = "black",  lwd = 2, lty = 2)
+abline(v = quantile(pred_season_best_l3, 0.025), col = "darkgrey", lwd = 1, lty = 3)
+abline(v = quantile(pred_season_best_l3, 0.975), col = "darkgrey", lwd = 1, lty = 3)
+
+
+
+### Using Layer 3 to Predict Timing of Peak Performance ### 
+
+# Evaluate the Layer 3 prediction across a fine grid of z values
+  # to find when within the season the predicted peak occurs
+
+z_grid <- seq(0.01, 0.99, length.out = 200)    # fine grid of time points across season
+                                                 # exclude boundaries where h*=0 by construction
+b_grid <- TruncBernstein(z_grid, degree = 4)   # evaluate RBP basis at all grid points
+ages_last <- ages.f[[athlete_idx]][last_season_idx]
+future_age <- mean(ages_last) + 1    # athlete's approximate age in the future season
+age_future_c <- future_age - mean_age  # centered future age
+
+peak_z_samples <- rep(NA, n_samples)   # holder for predicted peak timing per MCMC sample
+
+for (m in seq_len(n_samples)) {
+  
+  beta_a_m <- fm.res$beta_a[, m]
+  sigmasq_inc_m <- fm.res$sigmasq_inc[m]
+  sigmasq_rw3_m <- fm.res$sigmasq_rw_3[m]
+  beta_bi_m <- fm.res$beta_bi[[m]][athlete_idx, ]
+  sigmasqbeta_t_m <- fm.res$sigmasqbeta_t[, m]
+  sigmasqbeta_t_ind_m <- fm.res$sigmasqbeta_t_ind[athlete_idx, m]
+  
+  # Extend F (same as before)
+  F_observed <- fm.res$F[[athlete_idx]][1:n_seasons, m]
+  F_extended <- extend_F(F_observed, n_future = 1, sigmasq_inc = sigmasq_inc_m,
+                         sigmasq_rw_3 = sigmasq_rw3_m)
+  eta_start <- F_extended[n_seasons]
+  eta_end <- F_extended[n_seasons + 1]
+  
+  # Draw within-season coefficients
+  beta_bit_new <- rnorm(p_b, mean = beta_bi_m, sd = sqrt(sigmasqbeta_t_ind_m * sigmasqbeta_t_m))
+  
+  # Evaluate each component of the full prediction across the fine grid
+  layer1_grid <- as.numeric(c(1, age_future_c, age_future_c^2, age_future_c^3, 
+                               age_future_c^4) %*% beta_a_m[1:5])
+  fi_grid <- (1 - z_grid) * eta_start + z_grid * eta_end
+  h_star_grid <- as.numeric(b_grid %*% beta_bit_new)
+  
+  # Combine into full predicted performance curve for this MCMC sample
+  pred_perform_curve <- layer1_grid + fi_grid + h_star_grid   
+  
+  # Peak = minimum predicted time
+  peak_z_samples[m] <- z_grid[which.min(pred_perform_curve)]
+}
+
+# Convert z to approximate month (z=0 = Jan, z=1 = Dec)
+month_breaks <- seq(0, 1, length.out = 13)
+month_labels <- c("Jan","Feb","Mar","Apr","May","Jun",
+                  "Jul","Aug","Sep","Oct","Nov","Dec")
+peak_month_samples <- cut(peak_z_samples, breaks = month_breaks, labels = month_labels)
+
+# Summary of peak timing
+cat("\nWOMEN'S ATHLETE", athlete_idx, "PREDICTED PEAK TIMING\n")
+cat("Predicted peak z (median):", round(median(peak_z_samples), 3), "\n")
+cat("95% CI for peak z:[",
+    round(quantile(peak_z_samples, 0.025), 3), ",",
+    round(quantile(peak_z_samples, 0.975), 3), "]\n")
+cat("\nPredicted peak month distribution:\n")
+print(table(peak_month_samples))
+
+# Plot peak month distribution
+barplot(table(peak_month_samples) / n_samples, col = "steelblue",
+        main = "(W) Predicted Peak Performance Month - Athlete 1",
+        xlab = "Month", ylab   = "Probability", las = 2)
+
+```
+
+GENERIC GRAPHS (ie: can be used on any athlete)
+```{r}
+## GENERIC VERSION ##
+#### Multi-Season Horizon with Intermediate Predictions ####
+  # ie: one prediction per month
+  # for 1, 2, and 3 seasons ahead
+  # these leave out the 25m pool performances
+## FOR LAYER 3 MODEL ## 
+
+# Setup variables
+athlete_idx <- 1
+n_samples <- ncol(fm.res$beta_a)
+mean_age <- mean(unlist(ages.f))
+degree <- 4
+n_seasons <- length(unique(season.f[[athlete_idx]]))
+target_season <- n_seasons
+
+a1 <- n_seasons - 2
+a2 <- n_seasons - 1
+a3 <- n_seasons
+
+athlete_rows_x <- f.swim.data$athlete == athlete_idx
+athlete_id_x <- unique(f.swim.data$PersonId[athlete_rows_x])
+
+# Compute true exact ages for all athletes (before we only had integer age)
+f.swim.full.data$DateOfBirth <- as.Date(f.swim.full.data$DateOfBirth)
+f.swim.full.data$ResultDate <- as.Date(f.swim.full.data$ResultDate)
+f.swim.full.data$exact_age_true <- as.numeric(
+  f.swim.full.data$ResultDate - f.swim.full.data$DateOfBirth) / 365.25
+
+  # exact ages for Athlete x
+exact_age_x <- f.swim.full.data$exact_age_true[
+  match(
+    paste(f.swim.data$ResultDate[athlete_rows_x],
+          f.swim.data$PersonId[athlete_rows_x]),
+    paste(f.swim.full.data$ResultDate,
+          f.swim.full.data$PersonId.x)
+  )
+]
+  # date of birth for Athlete x
+dob_x <- as.Date(unique(f.swim.full.data$DateOfBirth[
+  f.swim.full.data$PersonId.x == athlete_id_x]))
+
+cat("Exact age range:", round(min(exact_age_x), 2),
+    "to", round(max(exact_age_x), 2), "\n")
+cat("Date of birth:", format(dob_x), "\n")
+cat("Any missing:", any(is.na(exact_age_x)), "\n")
+
+# Check that there are no gap years
+  # (we will also need season_years_x when running the model)
+season_years_x <- sapply(1:length(unique(season.f[[athlete_idx]])), function(s) {
+  season_rows <- which(season.f[[athlete_idx]] == s)
+  as.numeric(names(sort(table(
+    f.swim.data$Year[f.swim.data$athlete == athlete_idx][season_rows]
+  ), decreasing = TRUE))[1])
+})
+cat("Season years:", season_years_x, "\n")
+
+dob <- dob_x
+exact_age <- exact_age_x
+season_years <- season_years_x
+
+# Recompute season age ranges for current athlete
+season_start_ages <- sapply(season_years, function(yr) {
+  as.numeric(as.Date(paste0(yr, "-01-01")) - dob) / 365.25
+})
+season_end_ages <- sapply(season_years, function(yr) {
+  as.numeric(as.Date(paste0(yr + 1, "-01-01")) - dob) / 365.25
+})
+season_gaps <- diff(season_years) > 1
+years_observed <- season_years
+
+# Recompute fitted curves for Athlete x
+z_fine <- seq(0, 1, length.out = 102)
+b_fine <- TruncBernstein(z_fine, degree = 4)
+z_monthly <- seq(1/24, 23/24, length.out = 12)
+p_b <- nrow(fm.res$beta_b) 
+
+fitted_fine <- vector("list", n_seasons)
+for (s in 1:n_seasons) {
+  fitted_fine[[s]] <- matrix(NA, nrow = n_samples, ncol = length(z_fine))
+}
+
+# Compute fitted curves for all seasons
+for (m in seq_len(n_samples)) {
+  beta_a_m <- fm.res$beta_a[, m]
+  
+  for (s in 1:n_seasons) {
+    ages_z <- season_start_ages[s] + z_fine * (season_end_ages[s] - season_start_ages[s])
+    beta_bit_s <- fm.res$beta_bit[[athlete_idx]][[m]][s, ]
+    eta_s_start <- fm.res$F[[athlete_idx]][s, m]
+    eta_s_end <- fm.res$F[[athlete_idx]][s + 1, m]
+    
+    for (j in seq_along(z_fine)) {
+      age_c <- ages_z[j] - mean_age
+      des_mat <- c(1, age_c, age_c^2, age_c^3, age_c^4)
+      g_a <- as.numeric(des_mat %*% beta_a_m[1:5])
+      fi_z <- (1 - z_fine[j]) * eta_s_start + z_fine[j] * eta_s_end
+      h_star <- as.numeric(b_fine[j, ] %*% beta_bit_s)
+      fitted_fine[[s]][m, j] <- g_a + fi_z + h_star
+    }
+  }
+}
+
+# Summary of fitted curves
+fitted_fine_median <- lapply(1:n_seasons, function(s)
+  apply(fitted_fine[[s]], 2, median))
+fitted_fine_lower <- lapply(1:n_seasons, function(s)
+  apply(fitted_fine[[s]], 2, quantile, 0.025))
+fitted_fine_upper <- lapply(1:n_seasons, function(s)
+  apply(fitted_fine[[s]], 2, quantile, 0.975))
+
+# Helper function: computes predicted curve at monthly points
+  # for a given horizon, starting from a given season
+predict_season_curve <- function(fm.res, athlete_idx, train_up_to, 
+                                  predict_season, n_samples, p_b,
+                                  mean_age, z_monthly, ages_monthly_pred,
+                                  sigmasq_inc_vec, sigmasq_rw3_vec) {
+  
+  # holder for predictions
+  pred_matrix <- matrix(NA, nrow = n_samples, ncol = 12)
+  
+  # prediction loop (same as before)
+  for (m in seq_len(n_samples)) {
+    
+    beta_a_m <- fm.res$beta_a[, m]
+    sigmasq_inc_m <- sigmasq_inc_vec[m]
+    sigmasq_rw3_m <- sigmasq_rw3_vec[m]
+    beta_bi_m <- fm.res$beta_bi[[m]][athlete_idx, ]
+    sigmasqbeta_t_m <- fm.res$sigmasqbeta_t[, m]
+    sigmasqbeta_t_ind_m <- fm.res$sigmasqbeta_t_ind[athlete_idx, m]
+    
+    # extend F from end of training seasons to target season
+    n_future <- predict_season - train_up_to
+    F_obs <- fm.res$F[[athlete_idx]][1:train_up_to, m]
+    F_ext <- extend_F(F_obs, n_future = n_future, sigmasq_inc  = sigmasq_inc_m,
+                           sigmasq_rw_3 = sigmasq_rw3_m)
+    eta_start <- F_ext[predict_season - 1]
+    eta_end <- F_ext[predict_season] 
+    
+    # draw within-season coefficients for target season
+    beta_bit_new <- rnorm(p_b, mean = beta_bi_m, sd = sqrt(sigmasqbeta_t_ind_m * sigmasqbeta_t_m))
+    
+    # predictions for each month
+    for (j in 1:12) {
+      age_c <- ages_monthly_pred[j] - mean_age
+      des_mat <- c(1, age_c, age_c^2, age_c^3, age_c^4)
+      g_a <- as.numeric(des_mat %*% beta_a_m[1:5])
+      fi_z <- (1 - z_monthly[j]) * eta_start + z_monthly[j] * eta_end
+      b_z <- TruncBernstein(z_monthly[j], degree = 4)
+      h_star <- as.numeric(b_z %*% beta_bit_new)
+      pred_matrix[m, j] <- g_a + fi_z + h_star
+    }
+  }
+  
+  # return median + upper/lower bounds of 95% CI
+  list(median = apply(pred_matrix, 2, median),
+    lower = apply(pred_matrix, 2, quantile, 0.025),
+    upper = apply(pred_matrix, 2, quantile, 0.975))
+}
+
+
+# Helper function: computes ages_monthly for each predicted season
+get_ages_monthly <- function(season_yr, dob, z_monthly) {
+  age_jan1  <- as.numeric(as.Date(paste0(season_yr, "-01-01")) - dob) / 365.25
+  age_dec31 <- as.numeric(as.Date(paste0(season_yr, "-12-31")) - dob) / 365.25
+  age_jan1 + z_monthly * (age_dec31 - age_jan1)
+}
+
+# Compute ages_monthly for 1, 2, 3 seasons ahead
+ages_monthly_s1 <- get_ages_monthly(season_years[a1], dob, z_monthly)
+ages_monthly_s2 <- get_ages_monthly(season_years[a2], dob, z_monthly)
+ages_monthly_s3 <- get_ages_monthly(season_years[a3], dob, z_monthly)
+
+
+# Use helper function to compute all predicted curves 
+
+# Horizon 1: train on all but one season, predict the last one
+pred_h1_s1 <- predict_season_curve(
+  fm.res, athlete_idx, train_up_to = (a3 - 1), predict_season = a3,
+  n_samples, p_b, mean_age, z_monthly, ages_monthly_s3,
+  fm.res$sigmasq_inc, fm.res$sigmasq_rw_3)
+
+# Horizon 2: train on all by two seasons, predict the last two
+pred_h2_s1 <- predict_season_curve(
+  fm.res, athlete_idx, train_up_to = (a3 - 2), predict_season = (a3 - 1),
+  n_samples, p_b, mean_age, z_monthly, ages_monthly_s2,
+  fm.res$sigmasq_inc, fm.res$sigmasq_rw_3)
+
+pred_h2_s2 <- predict_season_curve(
+  fm.res, athlete_idx, train_up_to = (a3 - 2), predict_season = a3,
+  n_samples, p_b, mean_age, z_monthly, ages_monthly_s3,
+  fm.res$sigmasq_inc, fm.res$sigmasq_rw_3)
+
+# Horizon 3: train on all but three seasons, predict the last three
+pred_h3_s1 <- predict_season_curve(
+  fm.res, athlete_idx, train_up_to = (a3 - 3), predict_season = (a3 - 2),
+  n_samples, p_b, mean_age, z_monthly, ages_monthly_s1,
+  fm.res$sigmasq_inc, fm.res$sigmasq_rw_3)
+
+pred_h3_s2 <- predict_season_curve(
+  fm.res, athlete_idx, train_up_to = (a3 - 3), predict_season = (a3 - 1),
+  n_samples, p_b, mean_age, z_monthly, ages_monthly_s2,
+  fm.res$sigmasq_inc, fm.res$sigmasq_rw_3)
+
+pred_h3_s3 <- predict_season_curve(
+  fm.res, athlete_idx, train_up_to = (a3 - 3), predict_season = a3,
+  n_samples, p_b, mean_age, z_monthly, ages_monthly_s3,
+  fm.res$sigmasq_inc, fm.res$sigmasq_rw_3)
+
+
+# Plots
+
+# Helper function: draw one season band 
+draw_season_band <- function(season_yr, dob, y_min, y_max, col) {
+  age_jan1  <- as.numeric(as.Date(paste0(season_yr, "-01-01")) - dob) / 365.25
+  age_dec31 <- as.numeric(as.Date(paste0(season_yr, "-12-31")) - dob) / 365.25
+  rect(xleft = age_jan1, xright = age_dec31,
+       ybottom = y_min, ytop = y_max,
+       col = col, border = NA)
+}
+
+# Helper function: draw prediction CI
+draw_pred_ci <- function(ages_monthly, pred, col_ci) {
+  polygon(c(ages_monthly, rev(ages_monthly)),
+          c(pred$lower, rev(pred$upper)),
+          col = col_ci, border = NA)
+}
+
+# Helper function: draw prediction median line
+draw_pred_med <- function(ages_monthly, pred) {
+  lines(ages_monthly, pred$median, col = "black", lwd = 2, lty = 2)
+}
+
+
+# Shared plot settings
+all_preds <- c(pred_h1_s1$lower, pred_h1_s1$upper,
+               pred_h2_s1$lower, pred_h2_s1$upper,
+               pred_h2_s2$lower, pred_h2_s2$upper,
+               pred_h3_s1$lower, pred_h3_s1$upper,
+               pred_h3_s2$lower, pred_h3_s2$upper,
+               pred_h3_s3$lower, pred_h3_s3$upper)
+
+y_min_h <- min(c(target.f[[athlete_idx]], all_preds)) - 0.5
+y_max_h <- max(c(target.f[[athlete_idx]], all_preds)) + 0.5
+x_min_h <- season_start_ages[1] - 0.1
+x_max_h <- as.numeric(as.Date(paste0(season_years[a3], "-12-31")) - dob) / 365.25 + 0.1
+
+# Filter to take out the 25m pool performances (only want 50m pool ones)
+pool_indicator <- regressors_a.f[[athlete_idx]][, degree + 2]
+pool_50m_idx <- which(pool_indicator == 0)
+
+
+#par(mfrow = c(1, 3))
+
+# Horizon 1
+plot(NA, NA,
+     xlim = c(x_min_h, x_max_h), ylim = c(y_min_h, y_max_h),
+     xlab = "Age (Years)", ylab = "Performance (Seconds)",
+     main = "1 Season Ahead")
+
+  # calendar year bands
+for (y_idx in seq_along(years_observed)) {
+  yr <- years_observed[y_idx]
+  if (y_idx %% 2 == 1)
+    draw_season_band(yr, dob, y_min_h, y_max_h, "grey90")
+}
+
+  # band for future season
+draw_season_band(season_years[a3], dob, y_min_h, y_max_h, "lightblue1")
+
+  # prediction CI for one season ahead
+draw_pred_ci(ages_monthly_s3, pred_h1_s1, "lightblue3")
+
+  # fitted CI and median line for all seasons
+for (s in 1:a3) {
+  ages_z_s <- season_start_ages[s] + z_fine * (season_end_ages[s] - season_start_ages[s])
+  polygon(c(ages_z_s, rev(ages_z_s)),
+          c(fitted_fine_lower[[s]], rev(fitted_fine_upper[[s]])),
+          col = "grey70", border = NA)
+  lines(ages_z_s, fitted_fine_median[[s]], col = "black", lwd = 1.5)
+}
+
+  # prediction median line for one season ahead
+draw_pred_med(ages_monthly_s3, pred_h1_s1)
+
+  # observed performances
+obs_train <- which(season.f[[athlete_idx]] <= (a3 - 1))
+obs_test <- which(season.f[[athlete_idx]] == a3)
+  # keep only the 50m pool performances
+obs_train_50m <- intersect(obs_train, pool_50m_idx)
+obs_test_50m <- intersect(obs_test,  pool_50m_idx)
+points(exact_age[obs_train_50m], target.f[[athlete_idx]][obs_train_50m],
+       pch = 19, cex = 0.6, col = "black")
+points(exact_age[obs_test_50m], target.f[[athlete_idx]][obs_test_50m],
+       pch = 1, cex = 0.6)
+
+legend("bottomleft",
+       legend = c("Training performances",
+                  "Held-out performances",
+                  "Fitted trajectory (median)",
+                  "Fitted 95% CI",
+                  "Predicted trajectory (median)",
+                  "Predicted 95% CI"),
+       col = c("black", "black", "black", "grey70", "black", "lightblue3"),
+       lty = c(NA, NA, 1, NA, 2, NA), pch = c(19, 1, NA, 15, NA, 15),
+       lwd = c(NA, NA, 1.5, NA, 2, NA), bty = "n", cex = 0.6)
+
+
+# Horizon 2
+plot(NA, NA,
+     xlim = c(x_min_h, x_max_h), ylim = c(y_min_h, y_max_h),
+     xlab = "Age (Years)", ylab = "Performance (Seconds)",
+     main = "2 Seasons Ahead")
+
+for (y_idx in seq_along(years_observed)) {
+  yr <- years_observed[y_idx]
+  if (y_idx %% 2 == 1)
+    draw_season_band(yr, dob, y_min_h, y_max_h, "grey90")
+}
+
+  # prediction bands for 1 and 2 seasons ahead
+draw_season_band(season_years[a2], dob, y_min_h, y_max_h, "lightblue1")
+draw_season_band(season_years[a3], dob, y_min_h, y_max_h, "lightblue2")
+
+  # prediction CI for seasons 8 and 9
+draw_pred_ci(ages_monthly_s2, pred_h2_s1, "lightblue3")
+draw_pred_ci(ages_monthly_s3, pred_h2_s2, "lightblue3")
+
+  # fitted CI and median line for all seasons
+for (s in 1:a3) {
+  ages_z_s <- season_start_ages[s] + z_fine * (season_end_ages[s] - season_start_ages[s])
+  polygon(c(ages_z_s, rev(ages_z_s)),
+          c(fitted_fine_lower[[s]], rev(fitted_fine_upper[[s]])),
+          col = "grey70", border = NA)
+  lines(ages_z_s, fitted_fine_median[[s]], col = "black", lwd = 1.5)
+}
+
+  # prediction median lines for seasons 8 and 9
+draw_pred_med(ages_monthly_s2, pred_h2_s1)
+draw_pred_med(ages_monthly_s3, pred_h2_s2)
+
+  # observed performances
+obs_train <- which(season.f[[athlete_idx]] <= a1)
+obs_test <- which(season.f[[athlete_idx]] %in% c(a2, a3))
+obs_train_50m <- intersect(obs_train, pool_50m_idx)
+obs_test_50m  <- intersect(obs_test,  pool_50m_idx)
+points(exact_age[obs_train_50m], target.f[[athlete_idx]][obs_train_50m],
+       pch = 19, cex = 0.6, col = "black")
+points(exact_age[obs_test_50m], target.f[[athlete_idx]][obs_test_50m],
+       pch = 1, cex = 0.6)
+
+legend("bottomleft",
+       legend = c("Training performances",
+                  "Held-out performances",
+                  "Fitted trajectory (median)",
+                  "Fitted 95% CI",
+                  "Predicted trajectory (median)",
+                  "Predicted 95% CI"),
+       col = c("black", "black", "black", "grey70", "black","lightblue3"),
+       lty = c(NA, NA, 1, NA, 2, NA), pch = c(19, 1, NA, 15, NA, 15),
+       lwd = c(NA, NA, 1.5, NA, 2, NA), bty = "n", cex = 0.6)
+
+
+# Horizon 3
+plot(NA, NA,
+     xlim = c(x_min_h, x_max_h), ylim = c(y_min_h, y_max_h),
+     xlab = "Age (Years)", ylab = "Performance (Seconds)",
+     main = "3 Seasons Ahead")
+
+for (y_idx in seq_along(years_observed)) {
+  yr <- years_observed[y_idx]
+  if (y_idx %% 2 == 1)
+    draw_season_band(yr, dob, y_min_h, y_max_h, "grey90")
+}
+
+  # prediction bands for 1,2,3 seasons ahead
+draw_season_band(season_years[a1], dob, y_min_h, y_max_h, "lightblue1")
+draw_season_band(season_years[a2], dob, y_min_h, y_max_h, "lightblue2")
+draw_season_band(season_years[a3], dob, y_min_h, y_max_h, "lightblue1")
+
+  # prediction CI for 1,2,3 seasons ahead
+draw_pred_ci(ages_monthly_s1, pred_h3_s1, "lightblue3")
+draw_pred_ci(ages_monthly_s2, pred_h3_s2, "lightblue3")
+draw_pred_ci(ages_monthly_s3, pred_h3_s3, "lightblue3")
+
+  # fitted CI and median lines for all seasons
+for (s in 1:(a3)) {
+  ages_z_s <- season_start_ages[s] + z_fine * (season_end_ages[s] - season_start_ages[s])
+  polygon(c(ages_z_s, rev(ages_z_s)),
+          c(fitted_fine_lower[[s]], rev(fitted_fine_upper[[s]])),
+          col = "grey70", border = NA)
+  lines(ages_z_s, fitted_fine_median[[s]], col = "black", lwd = 1.5)
+}
+
+for (s in 1:a3) {
+  ages_z_s <- season_start_ages[s] + z_fine * (season_end_ages[s] - season_start_ages[s])
+  lines(ages_z_s, fitted_fine_median[[s]], col = "black", lwd = 1.5)
+}
+
+  # prediction median lines for 1,2,3 seasons ahead
+draw_pred_med(ages_monthly_s1, pred_h3_s1)
+draw_pred_med(ages_monthly_s2, pred_h3_s2) 
+draw_pred_med(ages_monthly_s3, pred_h3_s3) 
+
+  # observed performances
+obs_train <- which(season.f[[athlete_idx]] <= (a1 - 1))
+obs_test  <- which(season.f[[athlete_idx]] %in% c(a1, a2, a3))
+obs_train_50m <- intersect(obs_train, pool_50m_idx)
+obs_test_50m  <- intersect(obs_test,  pool_50m_idx)
+points(exact_age[obs_train_50m], target.f[[athlete_idx]][obs_train_50m],
+       pch = 19, cex = 0.6, col = "black")
+points(exact_age[obs_test_50m], target.f[[athlete_idx]][obs_test_50m],
+       pch = 1, cex = 0.6)
+
+legend("bottomleft",
+       legend = c("Training performances",
+                  "Held-out performances",
+                  "Fitted trajectory (median)",
+                  "Fitted 95% CI",
+                  "Predicted trajectory (median)",
+                  "Predicted 95% CI"),
+       col = c("black", "black", "black", "grey70", "black","lightblue3"),
+       lty = c(NA, NA, 1, NA, 2, NA), pch = c(19, 1, NA, 15, NA, 15),
+       lwd = c(NA, NA, 1.5, NA, 2, NA), bty = "n", cex = 0.6)
+```
+
+Log-Score for 1-6 Season Ahead Predictions (Horizons 1-6)
+```{r}
+#### Log-Score to Compare Uncertainties ####
+
+# Helper function: Compute log-score
+log_score <- function(pred_samples, actual) {
+  # fit kernel density to posterior predictive samples
+  dens <- density(pred_samples, n = 1024)
+  
+  # evaluate density at actual observed value
+    # using linear interpolation between density points
+  p_actual <- approx(dens$x, dens$y, xout = actual)$y
+  
+  # return negative log density (lower = better)
+  -log(p_actual)
+}
+
+# Helper function: Prediction for one athlete, one horizon (similar to above)
+predict_season_best <- function(fm.res, athlete_idx, target_season,
+                                 horizon, n_samples, p_b, mean_age) {
+  
+  last_season_idx <- which(season.f[[athlete_idx]] == target_season)
+  z_last <- times.f[[athlete_idx]][last_season_idx]
+  ages_last <- ages.f[[athlete_idx]][last_season_idx]
+  b_last <- TruncBernstein(z_last, degree = 4)
+  
+  pred_best <- rep(NA, n_samples)
+  
+  for (m in seq_len(n_samples)) {
+    
+    beta_a_m <- fm.res$beta_a[, m]
+    sigmasq_inc_m <- fm.res$sigmasq_inc[m]
+    sigmasq_rw3_m <- fm.res$sigmasq_rw_3[m]
+    beta_bi_m <- fm.res$beta_bi[[m]][athlete_idx, ]
+    sigmasqbeta_t_m <- fm.res$sigmasqbeta_t[, m]
+    sigmasqbeta_t_ind_m <- fm.res$sigmasqbeta_t_ind[athlete_idx, m]
+    
+    # extend F forward from end of training seasons
+    train_up_to  <- target_season - horizon
+    F_obs <- fm.res$F[[athlete_idx]][1:train_up_to, m]
+    F_ext <- extend_F(F_obs, n_future = horizon, sigmasq_inc  = sigmasq_inc_m,
+                             sigmasq_rw_3 = sigmasq_rw3_m)
+    eta_start <- F_ext[target_season - 1]
+    eta_end <- F_ext[target_season]
+    
+    # draw within-season coefficients for target season
+    beta_bit_new <- rnorm(p_b, mean = beta_bi_m, sd = sqrt(sigmasqbeta_t_ind_m * sigmasqbeta_t_m))
+    
+    # predict at each performance in target season
+    preds <- rep(NA, length(last_season_idx))
+    for (k in seq_along(last_season_idx)) {
+      age_c <- ages_last[k] - mean_age
+      des_mat <- c(1, age_c, age_c^2, age_c^3, age_c^4)
+      g_a <- as.numeric(des_mat %*% beta_a_m[1:5])
+      fi_z <- (1 - z_last[k]) * eta_start + z_last[k] * eta_end
+      h_star <- as.numeric(b_last[k, ] %*% beta_bit_new)
+      preds[k] <- g_a + fi_z + h_star
+    }
+    pred_best[m] <- min(preds)
+  }
+  return(pred_best)
+}
+
+# Helper function: Summary Statistics
+print_results <- function(athlete_idx, actual, pred_list) {
+  cat("\nSUMMARY STATISTICS: Athlete", athlete_idx, "\n")
+  cat("Actual season best:", round(actual, 3), "seconds\n")
+  cat(sprintf("%-12s %-10s %-10s %-10s %-10s %-10s\n",
+            "Horizon", "Median", "Error", "CI Width", "In CI?", "Log Score"))
+  for (h in seq_along(pred_list)) {
+    pred <- pred_list[[h]]
+    ls <- log_score(pred, actual)
+    cat(sprintf("%-12s %-10f %-10f %-10f %-10s %-10f\n",
+                paste(h, "season(s)"),
+                median(pred),
+                abs(median(pred) - actual),
+                diff(quantile(pred, c(0.025, 0.975))),
+                actual >= quantile(pred, 0.025) &
+                actual <= quantile(pred, 0.975),
+                ls))
+  }
+}
+
+
+## ATHLETE 1
+athlete_idx_a1 <- 1
+horizons_a1 <- 6
+n_seasons_a1 <- length(unique(season.f[[athlete_idx_a1]]))
+target_season_a1 <- n_seasons_a1
+actual_a1 <- min(target.f[[athlete_idx_a1]][season.f[[athlete_idx_a1]] == target_season_a1])
+
+pred_a1 <- vector("list", horizons_a1)  # holder for each horizon's summary stats
+for (h in 1:horizons_a1) {
+  pred_a1[[h]] <- predict_season_best(
+    fm.res, athlete_idx_a1, target_season_a1,
+    horizon = h,
+    n_samples = n_samples,
+    p_b = p_b,
+    mean_age = mean_age)
+}
+
+print_results(athlete_idx_a1, actual_a1, pred_a1)
+
+## ATHLETE 51
+athlete_idx_a51 <- 51
+horizons_a51 <- 6
+n_seasons_a51 <- length(unique(season.f[[athlete_idx_a51]]))
+target_season_a51 <- n_seasons_a51
+actual_a51 <- min(target.f[[athlete_idx_a51]][season.f[[athlete_idx_a51]] == target_season_a51])
+
+pred_a51 <- vector("list", horizons_a51)
+for (h in 1:horizons_a51) {
+  pred_a51[[h]] <- predict_season_best(
+    fm.res, athlete_idx_a51, target_season_a51,
+    horizon = h,
+    n_samples = n_samples,
+    p_b = p_b,
+    mean_age = mean_age)
+}
+
+print_results(athlete_idx_a51, actual_a51, pred_a51)
+
+
+## THOUGHT: Is the lower log-score for Athlete 51 due to no gap years 
+  # OR due to larger volume of data
+# Use only first 9 seasons of Athlete 51 to match Athlete 1's data volume
+target_season_a51_9 <- 9
+horizons_a51_9 <- 6
+actual_a51_9 <- min(target.f[[51]][season.f[[51]] == 9])
+
+pred_a51_9 <- vector("list", horizons_a51_9)
+for (h in 1:horizons_a51_9) {
+  pred_a51_9[[h]] <- predict_season_best(
+    fm.res, 51, target_season_a51_9,
+    horizon = h, n_samples = n_samples,
+    p_b = p_b, mean_age = mean_age)
+}
+
+cat("\nAthlete 51 - ONLY 9 Seasons")
+print_results(athlete_idx_a51, actual_a51_9, pred_a51_9)
+```
+
+Log-Score for Layers 1,2,3
+```{r}
+#### Going Back to the Layer 1,2,3 Models ####
+## Check Log-Score For Each of These ##
+log_score_ext <- function(pred_samples, actual) {
+  # extend range by 1 second in each direction to avoid NA at extremes
+  dens <- density(pred_samples, n = 1024,
+                      from = min(pred_samples) - 1,
+                      to = max(pred_samples) + 1)
+  p_actual <- approx(dens$x, dens$y, xout = actual)$y
+  
+  if (is.na(p_actual) || p_actual <= 0) { # Check edge cases 
+    return(Inf)   # actual is in essentially a zero-probability region 
+  }                  # so don't compute log-score 
+  -log(p_actual)
+}
+
+ls_l1 <- log_score_ext(pred_season_best_l1, actual_season_best)
+ls_l2 <- log_score_ext(pred_season_best_l2, actual_season_best)
+ls_l3 <- log_score_ext(pred_season_best_l3, actual_season_best)
+
+cat("Log scores by layer:\n")
+cat("Layer 1:", round(ls_l1, 3), "\n")
+cat("Layer 2:", round(ls_l2, 3), "\n")
+cat("Layer 3:", round(ls_l3, 3), "\n")
+
+# Check for which athlete these log-scores belong to
+cat("Actual season best:", actual_season_best, "\n")
+cat("Layer 1 range:", round(range(pred_season_best_l1), 3), "\n")
+cat("Layer 2 range:", round(range(pred_season_best_l2), 3), "\n")
+cat("Layer 3 range:", round(range(pred_season_best_l3), 3), "\n")
+
+```
+
+Multiple Athletes, Multiple Seasons Ahead Predictions
+```{r}
+# First find athletes with sufficient amount of data
+  # check season counts for all athletes
+season_counts.f <- sapply(1:100, function(i) length(unique(season.f[[i]])))
+table(season_counts.f)
+summary(season_counts.f)
+
+  # which athletes have sufficient seasons for each horizon group
+min_seasons_h3 <- 5    # to predict horizons 1-3
+min_seasons_h6 <- 8    # to predict horizons 1-6
+
+athletes_h3.f <- which(season_counts.f >= min_seasons_h3)
+athletes_h6.f <- which(season_counts.f >= min_seasons_h6)
+
+cat("Women athletes with >= 5 seasons (horizons 1-3):", length(athletes_h3.f), "\n")
+cat("Women athlete indices:", athletes_h3.f, "\n\n")
+
+cat("Women athletes with >= 8 seasons (horizons 1-6):", length(athletes_h6.f), "\n")
+cat("Women athlete indices:", athletes_h6.f, "\n\n")
+
+# Summary of how many athletes are excluded
+cat("Excluded from h1-3 analysis:", 100 - length(athletes_h3.f), "athletes\n")
+cat("Excluded from h1-6 analysis:", 100 - length(athletes_h6.f), "athletes\n")
+
+
+# Storage for results
+  # rows = athletes, cols = horizons
+results_median.f <- matrix(NA, nrow = 100, ncol = 6)
+results_error.f <- matrix(NA, nrow = 100, ncol = 6)
+results_ci_width.f <- matrix(NA, nrow = 100, ncol = 6)
+results_coverage.f <- matrix(NA, nrow = 100, ncol = 6)
+results_logscore.f <- matrix(NA, nrow = 100, ncol = 6)
+actual_bests.f <- rep(NA, 100)
+n_seasons_all.f <- rep(NA, 100)
+
+
+for (i in 1:100) {
+
+  n_s <- season_counts.f[i]
+  n_seasons_all.f[i] <- n_s
+  
+  # skip athletes with fewer than 5 seasons
+  if (n_s < 5) {
+    cat("(W) Athlete", i, ": skipped (only", n_s, "seasons)\n")
+    next
+  }
+  
+  cat("(W) Athlete", i, "(", n_s, "seasons)\n")
+  
+  # target season = last season
+  target_s <- n_s
+  last_idx <- which(season.f[[i]] == target_s)
+  actual_best.f <- min(target.f[[i]][last_idx])
+  actual_bests.f[i] <- actual_best.f
+  
+  # determine max horizon for this athlete
+  max_h <- ifelse(n_s >= 8, 6, 3)
+  
+  # run predictions for each horizon
+  for (h in 1:max_h) {
+    
+    pred <- predict_season_best(
+      fm.res = fm.res,
+      athlete_idx = i,
+      target_season = target_s,
+      horizon = h,
+      n_samples = n_samples,
+      p_b = p_b,
+      mean_age = mean_age)
+    
+    results_median.f[i, h] <- median(pred)
+    results_error.f[i, h] <- abs(median(pred) - actual_best.f)
+    results_ci_width.f[i, h] <- diff(quantile(pred, c(0.025, 0.975)))
+    results_coverage.f[i, h] <- actual_best.f >= quantile(pred, 0.025) &
+                               actual_best.f <= quantile(pred, 0.975)
+    results_logscore.f[i, h] <- log_score(pred, actual_best.f)
+  }
+}
+
+
+# Summary Statistics
+cat("\n SUMMARY: Horizons 1-3 (",length(athletes_h3.f), "(W) Athletes Included) \n")
+cat(sprintf("%-15s %-10s %-10s %-10s %-10s\n",
+            "Horizon", "Mean Error", "Coverage", "Mean CIW", "Mean LS"))
+
+for (h in 1:3) {
+  # only include athletes who had this horizon computed
+  valid <- !is.na(results_error.f[, h])
+  cat(sprintf("%-15s %-10f %-10f %-10f %-10f\n",
+              paste(h, "season(s)"),
+              mean(results_error.f[valid, h]),
+              mean(results_coverage.f[valid, h]),
+              mean(results_ci_width.f[valid, h]),
+              mean(results_logscore.f[valid, h], na.rm = TRUE)))
+}
+
+cat("\nSUMMARY: Horizons 4-6 (", length(athletes_h6.f), "(W) Athletes Included) \n")
+cat(sprintf("%-15s %-10s %-10s %-10s %-10s\n",
+            "Horizon", "Mean Error", "Coverage", "Mean CIW", "Mean LS"))
+
+for (h in 4:6) {
+  valid.f <- !is.na(results_error.f[, h])
+  cat(sprintf("%-15s %-10f %-10f %-10f %-10s\n",
+              paste(h, "season(s)"),
+              mean(results_error.f[valid.f, h]),
+              mean(results_coverage.f[valid.f, h]),
+              mean(results_ci_width.f[valid.f, h]),
+              mean(results_logscore.f[valid.f, h], na.rm = TRUE)))
+}
+
+
+# Identify the Interesting Cases
+
+# Best predicted athletes at horizon 1
+best_h1.f <- order(results_error.f[, 1], na.last = TRUE)[1:5]
+cat("\nBest Predicted Women's Athletes at Horizon 1:\n")
+for (i in best_h1.f) {
+  if (!is.na(results_error.f[i, 1]))
+    cat("  Women's Athlete", i, ": error =", round(results_error.f[i, 1], 3),
+        "log score =", round(results_logscore.f[i, 1], 3),
+        "seasons =", n_seasons_all.f[i], "\n")
+}
+
+# Worst predicted athletes at horizon 1
+worst_h1.f <- order(results_error.f[, 1], na.last = TRUE, decreasing = TRUE)[1:5]
+cat("\nWorst Predicted Women's Athletes at Horizon 1:\n")
+for (i in worst_h1.f) {
+  if (!is.na(results_error.f[i, 1]))
+    cat("  Women's Athlete", i, ": error =", round(results_error.f[i, 1], 3),
+        "log score =", round(results_logscore.f[i, 1], 3),
+        "seasons =", n_seasons_all.f[i], "\n")
+}
+
+# Athletes where log score is Inf (prediction completely missed)
+inf_ls.f <- which(is.infinite(results_logscore.f[, 1]))
+cat("\nWomen's athletes where Layer 3 prediction completely missed at horizon 1:\n")
+cat("  Women's athlete indices:", inf_ls.f, "\n")
+cat("  Number:", length(inf_ls.f), "out of", length(athletes_h3.f), "\n")
+
+
+#  Save Results
+validation_results.f <- list(
+  results_median.f = results_median.f,
+  results_error.f = results_error.f,
+  results_ci_width.f = results_ci_width.f,
+  results_coverage.f = results_coverage.f,
+  results_logscore.f = results_logscore.f,
+  actual_bests.f = actual_bests.f,
+  n_seasons_all.f = n_seasons_all.f,
+  athletes_h3.f = athletes_h3.f,
+  athletes_h6.f = athletes_h6.f
+)
+
+saveRDS(validation_results.f, "validation_results.rds")
+
+
+#results_median.f <- validation_results$results_median
+#results_error.f <- validation_results$results_error
+#results_ci_width.f <- validation_results$results_ci_width
+#results_coverage.f <- validation_results$results_coverage
+#results_logscore.f <- validation_results$results_logscore
+#actual_bests.f <- validation_results$actual_bests
+#n_seasons_all.f <- validation_results$n_seasons_all
+#athletes_h3.f <- validation_results$athletes_h3
+#athletes_h6.f <- validation_results$athletes_h6
+
+# Clean infinite log scores
+results_logscore_clean.f <- results_logscore.f
+results_logscore_clean.f[is.infinite(results_logscore_clean.f)] <- NA
+
+
+## THOUGHT: which affects predictions more - # of seasons or if there are gap years
+
+# Check if number of seasons correlates with prediction accuracy
+cor(n_seasons_all.f[athletes_h3.f], results_error.f[athletes_h3.f, 1], use = "complete.obs")
+
+# Check if gap years correlate with poor predictions
+  # identify athletes with gap years
+has_gap_f <- sapply(1:100, function(i) {
+  yrs <- sort(unique(f.swim.data$Year[f.swim.data$athlete == i]))
+  any(diff(yrs) > 1)
+})
+
+  # compare mean error for gap vs no-gap year athletes at horizon 1
+gap_athletes.f <- intersect(which(has_gap_f), athletes_h3.f)
+no_gap_athletes.f <- intersect(which(!has_gap_f), athletes_h3.f)
+
+cat("Gap year athletes (W) - mean error at H1:", 
+    round(mean(results_error.f[gap_athletes.f, 1], na.rm = TRUE), 3), "\n")
+cat("No gap year athletes (W) - mean error at H1:", 
+    round(mean(results_error.f[no_gap_athletes.f, 1], na.rm = TRUE), 3), "\n")
+cat("Gap year athletes (W) - mean log score at H1:", 
+    round(mean(results_logscore_clean.f[gap_athletes.f, 1], na.rm = TRUE), 3), "\n")
+cat("No gap year athletes (W) - mean log score at H1:", 
+    round(mean(results_logscore_clean.f[no_gap_athletes.f, 1], na.rm = TRUE), 3), "\n")
+
+# Which of the worst predicted athletes had gap years
+cat("Gap year status of worst predicted women's athletes:\n")
+for (i in c(20, 27, 76, 22, 63)) {
+  yrs <- sort(unique(f.swim.data$Year[f.swim.data$athlete == i]))
+  cat("(W) Athlete", i, ":", n_seasons_all.f[i], "seasons,",
+      "gap year:", any(diff(yrs) > 1), "\n")
+}
+
+  # investigate worst predicted non-gap year athletes
+for (i in c(27, 22, 63)) {
+  yrs <- sort(unique(f.swim.data$Year[f.swim.data$athlete == i]))
+  n_s <- n_seasons_all.f[i]
+  last_s <- n_s
+  last_idx <- which(season.f[[i]] == last_s)
+  
+  cat("\n(W) Athlete", i, ":\n")
+  cat("  Seasons:", n_s, "| Years:", min(yrs), "to", max(yrs), "\n")
+  cat("  Actual season best:", round(actual_bests.f[i], 3), "seconds\n")
+  cat("  Predicted median at H1:", round(results_median.f[i, 1], 3), "seconds\n")
+  cat("  Error at H1:", round(results_error.f[i, 1], 3), "seconds\n")
+  cat("  Log score at H1:", round(results_logscore.f[i, 1], 3), "\n")
+  
+  # print all season bests to see career trajectory
+  cat("  Season bests:\n")
+  for (s in 1:n_s) {
+    s_idx <- which(season.f[[i]] == s)
+    cat("    Season", s, ":", round(min(target.f[[i]][s_idx]), 3), 
+        "seconds (", length(s_idx), "performances)\n")
+  }
+}
+
+# Which of the best predicted athletes had gap years
+cat("Gap year status of best predicted women's athletes:\n")
+for (i in c(83, 72, 96, 97, 49)) {
+  yrs <- sort(unique(f.swim.data$Year[f.swim.data$athlete == i]))
+  cat("(W) Athlete", i, ":", n_seasons_all.f[i], "seasons,",
+      "gap year:", any(diff(yrs) > 1), "\n")
+}
+
+for (i in c(83, 72, 96, 97, 49)) {
+  yrs <- sort(unique(f.swim.data$Year[f.swim.data$athlete == i]))
+  n_s <- n_seasons_all.f[i]
+  
+  cat("\n(W) Athlete", i, ":\n")
+  cat("  Seasons:", n_s, "| Years:", min(yrs), "to", max(yrs), "\n")
+  cat("  Gap year:", any(diff(yrs) > 1), "\n")
+  cat("  Actual season best:", round(actual_bests.f[i], 3), "seconds\n")
+  cat("  Predicted median H1:", round(results_median.f[i, 1], 3), "seconds\n")
+  cat("  Error H1:", round(results_error.f[i, 1], 3), "seconds\n")
+  cat("  Log score H1:", round(results_logscore.f[i, 1], 3), "\n")
+  
+  cat("  Season bests:\n")
+  for (s in 1:n_s) {
+    s_idx <- which(season.f[[i]] == s)
+    cat("    Season", s, ":", round(min(target.f[[i]][s_idx]), 3),
+        "seconds (", length(s_idx), "performances)\n")
+  }
+}
+
+
+
+early_gap_f <- c()
+late_gap_f  <- c()
+
+for (i in which(has_gap_f)) {
+  yrs <- sort(unique(f.swim.data$Year[f.swim.data$athlete == i]))
+  gap_positions <- which(diff(yrs) > 1)
+  n_s <- length(unique(season.f[[i]]))
+  
+  if (any(gap_positions >= (n_s - 3))) {
+    late_gap_f <- c(late_gap_f, i)
+  } else {
+    early_gap_f <- c(early_gap_f, i)
+  }
+}
+
+cat("Female athletes with early career gap:", length(early_gap_f), "\n")
+cat("Female athletes with late career gap:", length(late_gap_f), "\n")
+
+cat("Early gap mean log score H1:", 
+    round(mean(results_logscore_clean.f[early_gap_f, 1], na.rm=TRUE), 3), "\n")
+cat("Late gap mean log score H1:", 
+    round(mean(results_logscore_clean.f[late_gap_f, 1], na.rm=TRUE), 3), "\n")
+
+
+cat("Female early gap in h3 analysis:", 
+    length(intersect(early_gap_f, athletes_h3.f)), "\n")
+cat("Female late gap in h3 analysis:", 
+    length(intersect(late_gap_f, athletes_h3.f)), "\n")
+```
+
+Log-Score Degradation Plots
+```{r} 
+# First create naive baseline for comparison
+  # naive baseline: predict using historical (career) mean and sd of season bests
+naive_log_score <- function(athlete_idx, target_season) {
+  
+  # compute historical season bests for all seasons except the target
+  historical_bests <- sapply(1:(target_season - 1), function(s) {
+    s_idx <- which(season.f[[athlete_idx]] == s)
+    min(target.f[[athlete_idx]][s_idx])
+  })
+  
+  # fit a normal distribution to historical season bests
+  hist_mean <- mean(historical_bests)
+  hist_sd <- sd(historical_bests)
+  
+  # actual season best
+  actual <- min(target.f[[athlete_idx]][season.f[[athlete_idx]] == target_season])
+  
+  # log score of normal distribution at actual value
+  -log(dnorm(actual, mean = hist_mean, sd = hist_sd))
+}
+
+naive_baselines.f <- rep(NA, 100)
+for (i in athletes_h3.f) {
+  naive_baselines.f[i] <- naive_log_score(i, n_seasons_all.f[i])
+}
+cat("Female mean naive baseline:", 
+    round(mean(naive_baselines.f[athletes_h3.f], na.rm=TRUE), 3), "\n")
+
+  # compute mean log scores across all athletes at each horizon (1-6)
+    # overall, gap, and no-gap separately
+mean_ls.f <- rep(NA, 6)
+mean_ls_gap.f <- rep(NA, 6)
+mean_ls_no_gap.f <- rep(NA, 6)
+sd_ls.f <- rep(NA, 6)   # standard deviation for error bars
+
+for (h in 1:6) {
+  # all athletes
+  valid.f <- athletes_h3.f[!is.na(results_logscore_clean.f[athletes_h3.f, h])]
+  if (h > 3) {
+    valid <- athletes_h6.f[!is.na(results_logscore_clean.f[athletes_h6.f, h])]
+  }
+  mean_ls.f[h] <- mean(results_logscore_clean.f[valid.f, h])
+  sd_ls.f[h] <- sd(results_logscore_clean.f[valid.f, h])
+  
+  # gap athletes
+  gap_valid.f <- gap_athletes.f[!is.na(results_logscore_clean.f[gap_athletes.f, h])]
+  mean_ls_gap.f[h] <- mean(results_logscore_clean.f[gap_valid.f, h])
+  
+  # no-gap athletes
+  no_gap_valid.f <- no_gap_athletes.f[!is.na(results_logscore_clean.f[no_gap_athletes.f, h])]
+  mean_ls_no_gap.f[h] <- mean(results_logscore_clean.f[no_gap_valid.f, h])
+}
+
+  # mean naive baseline
+mean_naive.f <- mean(naive_baselines.f[athletes_h3.f], na.rm = TRUE)
+
+# Look at how log-score degrade as horizons increases
+cat("Mean Log-Scores By Horizon:\n")
+cat(sprintf("%-15s %-8s %-8s %-8s\n", "Horizon", "All", "Gap", "No Gap"))
+for (h in 1:6) {
+  cat(sprintf("%-15s %-8.4f %-8.4f %-8.4f\n",
+              paste(h, "season(s)"),
+              mean_ls.f[h],
+              mean_ls_gap.f[h],
+              mean_ls_no_gap.f[h]))
+}
+cat(sprintf("%-15s %-8.4f\n", "Naive baseline", mean_naive.f))
+
+# Plot (want to see if there is a clear "elbow")
+plot(NA, NA,
+     xlim = c(0.8, 6.2),
+     ylim = range(c(mean_ls_gap.f, mean_ls_no_gap.f, mean_naive.f), 
+                  na.rm = TRUE) + c(-0.2, 0.2),
+     xlab = "Forecast Horizon (Seasons Ahead)",
+     ylab = "Mean Log Score (lower = better)",
+     main = "(W) Log Score Degradation by Career Continuity",
+     xaxt = "n")
+axis(1, at = 1:6)
+
+  # naive baseline reference line
+abline(h = mean_naive.f, col = "grey", lty = 3, lwd = 1.5)
+
+  # all athletes
+lines(1:6, mean_ls.f, type = "b", pch = 19, col = "black", lwd = 2, cex = 1.2)
+
+  # gap year athletes
+lines(1:6, mean_ls_gap.f, type = "b", pch = 17, col = "tomato", lwd = 2, lty = 2, cex = 1.2)
+
+  # no gap athletes
+lines(1:6, mean_ls_no_gap.f, type = "b", pch = 15, col = "darkseagreen", lwd = 2, lty = 2, cex = 1.2)
+
+  # add error bars (±1 SD) for all athletes line
+arrows(1:6, mean_ls.f - sd_ls.f, 1:6, mean_ls.f + sd_ls.f,
+       angle = 90, code = 3, length = 0.05,
+       col = "grey50", lwd = 1)
+
+legend("topleft",
+       legend = c("All Athletes (W)",
+                  "Gap Year Athletes",
+                  "No Gap Athletes",
+                  "Error Bars (±1 SD)",
+                  "Naive Baseline"),
+       col    = c("black", "tomato", "darkseagreen", "grey50", "grey"),
+       lty    = c(1, 2, 2, 1, 3),
+       pch    = c(19, 17, 15, NA, NA),
+       lwd    = 2, bty = "n", cex = 0.9)
+```
+
+CALIBRATION
+```{r}
+# First need to rerun the prediction (same as before) 
+  # but save the raw samples (not just median & ci)
+
+pred_samples_all_f <- array(NA, dim = c(n_samples, 100, 6))
+
+for (i in athletes_h3.f) {
+  max_h.f <- ifelse(i %in% athletes_h6.f, 6, 3)
+  for (h in 1:max_h.f) {
+    pred_samples_all_f[, i, h] <- predict_season_best(
+      fm.res = fm.res,
+      athlete_idx = i,
+      target_season = n_seasons_all.f[i],
+      horizon = h,
+      n_samples = n_samples,
+      p_b = p_b,
+      mean_age = mean_age)
+  }
+}
+
+#saveRDS(pred_samples_all_f, "pred_samples_all_f.rds")
+
+
+# Calibration calculation
+alpha_levels <- c(0.50, 0.60, 0.70, 0.80, 0.90, 0.95)
+coverage_mat_f <- matrix(NA, nrow = 6, ncol = length(alpha_levels))  # Holder
+
+  # calculate how many of the actual season bests lie in the ci
+for (h in 1:6) {
+  eligible <- if (h <= 3) athletes_h3.f else athletes_h6.f
+  for (a_idx in seq_along(alpha_levels)) {
+    alpha <- alpha_levels[a_idx]  # nominal coverage level
+    lower_q <- (1 - alpha) / 2    # ci lower bound
+    upper_q <- 1 - lower_q        # ci upper bound
+    
+    in_ci <- rep(NA, 100)
+    for (i in eligible) {
+      pred <- pred_samples_all_f[, i, h]
+      actual <- actual_bests.f[i]
+      # TRUE if actual season best falls within the alpha% CI
+      in_ci[i] <- actual >= quantile(pred, lower_q, na.rm = TRUE) &
+                  actual <= quantile(pred, upper_q, na.rm = TRUE)
+    }
+    # observed coverage = proportion of athletes where actual falls in CI
+    coverage_mat_f[h, a_idx] <- mean(in_ci, na.rm = TRUE)
+  }
+}
+
+# Coverage table
+cat("(W) Calibration Results (By Horizon):\n")
+cat(sprintf("%-10s %-8s %-8s %-8s %-8s %-8s %-8s\n", 
+            "Horizon", "50%", "60%", "70%", "80%", "90%", "95%"))
+for (h in 1:6) {
+  cat(sprintf("%-10s %-8.4f %-8.4f %-8.4f %-8.4f %-8.4f %-8.4f\n",
+              paste("H", h),
+              coverage_mat_f[h, 1],
+              coverage_mat_f[h, 2],
+              coverage_mat_f[h, 3],
+              coverage_mat_f[h, 4],
+              coverage_mat_f[h, 5],
+              coverage_mat_f[h, 6]))
+}
+
+# Plot
+plot(NA, NA,
+     xlim = c(0.25, 1), ylim = c(0.25, 1),
+     xlab = "Nominal Coverage", ylab = "Observed Coverage",
+     main = "(W) Calibration Plot by Prediction Horizon")
+
+  # perfect calibration = diagonal line
+abline(0, 1, col = "grey50", lty = 2, lwd = 1.5)
+
+  # add reference lines
+abline(h = seq(0.3, 1, by = 0.1), col = "grey90", lty = 1)
+abline(v = seq(0.3, 1, by = 0.1), col = "grey90", lty = 1)
+
+  # plot horizons 1,3,5
+cols <- c("steelblue", "mediumpurple", "goldenrod")
+
+lines(alpha_levels, coverage_mat_f[1, ], type = "b", pch = 19,
+        col = cols[1], lwd = 2, cex = 1.2)
+lines(alpha_levels, coverage_mat_f[3, ], type = "b", pch = 19,
+        col = cols[2], lwd = 2, cex = 1.2)
+lines(alpha_levels, coverage_mat_f[5, ], type = "b", pch = 19,
+        col = cols[3], lwd = 2, cex = 1.2)
+
+legend("topleft",
+       legend = c("Perfect calibration",
+                  "Horizon 1", "Horizon 3", "Horizon 5"),
+       col    = c("grey50", cols),
+       lty    = c(2, 1, 1, 1),
+       pch    = c(NA, 19, 19, 19),
+       lwd    = 2, bty = "n")
+
+```
+
+Calibration by Gap Year/No-Gap Year
+```{r}
+# Holders
+coverage_gap.f <- matrix(NA, nrow = 3, ncol = length(alpha_levels))
+coverage_no_gap.f <- matrix(NA, nrow = 3, ncol = length(alpha_levels))
+
+# Redefine gap athletes
+has_gap.f <- sapply(1:100, function(i) {
+  yrs <- sort(unique(f.swim.data$Year[f.swim.data$athlete == i]))
+  any(diff(yrs) > 1)
+})
+
+# Separate gap athletes from no-gap athletes
+gap_athletes_h3.f <- intersect(which(has_gap.f),  athletes_h3.f)
+no_gap_athletes_h3.f <- intersect(which(!has_gap.f), athletes_h3.f)
+
+# Calibration computation (same as above)
+for (h in 1:3) {
+  for (a_idx in seq_along(alpha_levels)) {
+    alpha <- alpha_levels[a_idx]
+    lower_q <- (1 - alpha) / 2
+    upper_q <- 1 - lower_q
+    
+    in_ci_gap <- rep(NA, 100)
+    in_ci_no_gap <- rep(NA, 100)
+    
+    for (i in gap_athletes_h3.f) {
+      pred <- pred_samples_all_f[, i, h]
+      in_ci_gap[i] <- actual_bests.f[i] >= quantile(pred, lower_q, na.rm = TRUE) &
+                      actual_bests.f[i] <= quantile(pred, upper_q, na.rm = TRUE)
+    }
+    for (i in no_gap_athletes_h3.f) {
+      pred <- pred_samples_all_f[, i, h]
+      in_ci_no_gap[i] <- actual_bests.f[i] >= quantile(pred, lower_q, na.rm = TRUE) &
+                         actual_bests.f[i] <= quantile(pred, upper_q, na.rm = TRUE)
+    }
+    
+    coverage_gap.f[h, a_idx] <- mean(in_ci_gap, na.rm = TRUE)
+    coverage_no_gap.f[h, a_idx] <- mean(in_ci_no_gap, na.rm = TRUE)
+  }
+}
+
+# Coverage table
+cat("(W) Calibration by Career Continuity (Horizon 1):\n")
+cat(sprintf("%-12s %8s %8s %8s %8s %8s %8s\n",
+            "", "50%", "60%", "70%", "80%", "90%", "95%"))
+cat(sprintf("%-12s %8.3f %8.3f %8.3f %8.3f %8.3f %8.3f\n",
+            "Gap",
+            coverage_gap.f[1,1], coverage_gap.f[1,2], coverage_gap.f[1,3],
+            coverage_gap.f[1,4], coverage_gap.f[1,5], coverage_gap.f[1,6]))
+cat(sprintf("%-12s %8.3f %8.3f %8.3f %8.3f %8.3f %8.3f\n",
+            "No Gap",
+            coverage_no_gap.f[1,1], coverage_no_gap.f[1,2], coverage_no_gap.f[1,3],
+            coverage_no_gap.f[1,4], coverage_no_gap.f[1,5], coverage_no_gap.f[1,6]))
+
+# Calibration Plot
+  # by gap status for horizon 1
+plot(NA, NA,
+     xlim = c(0.2, 1), ylim = c(0.2, 1),
+     xlab = "Nominal Coverage", ylab = "Observed Coverage",
+     main = "(W) Calibration by Career Continuity (Horizon 1)")
+
+  # perfect calibration
+abline(0, 1, col = "grey50", lty = 2, lwd = 1.5)
+
+  # reference lines
+abline(h = seq(0.3, 1, by = 0.1), col = "grey90")
+abline(v = seq(0.3, 1, by = 0.1), col = "grey90")
+
+  # plot gap year & no-gap year calibrations 
+lines(alpha_levels, coverage_gap.f[1, ], type = "b", pch = 19, col = "tomato", lwd = 2)
+lines(alpha_levels, coverage_no_gap.f[1, ], type = "b", pch = 19, col = "darkseagreen", lwd = 2)
+
+legend("topleft",
+       legend = c("Perfect Calibration", 
+                  "Gap Year Athletes",
+                  "No Gap Athletes"),
+       col = c("grey50", "tomato", "darkseagreen"),
+       lty = c(2, 1, 1), pch = c(NA, 19, 19),
+       lwd = 2, bty = "n")
+```
+
+Calibration Plot for Layers 1,2,3
+```{r}
+# Holder
+pred_samples_layers.f <- array(NA, dim = c(n_samples, 100, 3))
+
+# Rerun Layers 1,2,3 predictions for all athletes (same as before)
+for (i in athletes_h3.f) {
+  
+  last_s <- n_seasons_all.f[i]
+  last_idx <- which(season.f[[i]] == last_s)
+  z_last_i <- times.f[[i]][last_idx]
+  ages_last_i <- ages.f[[i]][last_idx]
+  b_last_i <- TruncBernstein(z_last_i, degree = 4)
+  
+  pred_l1 <- rep(NA, n_samples)
+  pred_l2 <- rep(NA, n_samples)
+  pred_l3 <- rep(NA, n_samples)
+  
+  for (m in seq_len(n_samples)) {
+    
+    beta_a_m <- fm.res$beta_a[, m]
+    sigmasq_inc_m <- fm.res$sigmasq_inc[m]
+    sigmasq_rw3_m <- fm.res$sigmasq_rw_3[m]
+    beta_bi_m <- fm.res$beta_bi[[m]][i, ]
+    sigmasqbeta_t_m <- fm.res$sigmasqbeta_t[, m]
+    sigmasqbeta_t_ind_m <- fm.res$sigmasqbeta_t_ind[i, m]
+    
+    # extend F by 1 season (horizon 1 for all layers)
+    F_obs <- fm.res$F[[i]][1:(last_s - 1), m]
+    F_ext <- extend_F(F_obs, n_future = 1, sigmasq_inc = sigmasq_inc_m,
+                          sigmasq_rw_3 = sigmasq_rw3_m)
+    eta_start <- F_ext[last_s - 1]
+    eta_end <- F_ext[last_s]
+
+    beta_bit_new <- rnorm(p_b, mean = beta_bi_m, sd = sqrt(sigmasqbeta_t_ind_m * sigmasqbeta_t_m))
+    
+    preds_l1 <- rep(NA, length(last_idx))
+    preds_l2 <- rep(NA, length(last_idx))
+    preds_l3 <- rep(NA, length(last_idx))
+    
+    for (k in seq_along(last_idx)) {
+      age_c <- ages_last_i[k] - mean_age
+      des_mat <- c(1, age_c, age_c^2, age_c^3, age_c^4)
+      g_a <- as.numeric(des_mat %*% beta_a_m[1:5])
+      fi_z <- (1 - z_last_i[k]) * eta_start + z_last_i[k] * eta_end
+      h_star <- as.numeric(b_last_i[k, ] %*% beta_bit_new)
+      
+      preds_l1[k] <- g_a                    # Layer 1: g(a) only
+      preds_l2[k] <- g_a + fi_z             # Layer 2: g(a) + f_i(z)
+      preds_l3[k] <- g_a + fi_z + h_star    # Layer 3: full model
+    }
+    
+    pred_l1[m] <- min(preds_l1)
+    pred_l2[m] <- min(preds_l2)
+    pred_l3[m] <- min(preds_l3)
+  }
+  
+  pred_samples_layers.f[, i, 1] <- pred_l1
+  pred_samples_layers.f[, i, 2] <- pred_l2
+  pred_samples_layers.f[, i, 3] <- pred_l3
+}
+
+saveRDS(pred_samples_layers.f, "pred_samples_layers.rds")
+
+# Calibration Computation (same as before) 
+alpha_levels  <- c(0.50, 0.60, 0.70, 0.80, 0.90, 0.95)
+coverage_layers.f <- matrix(NA, nrow = 3, ncol = length(alpha_levels))
+
+for (l in 1:3) {
+  for (a_idx in seq_along(alpha_levels)) {
+    alpha <- alpha_levels[a_idx]
+    lower_q <- (1 - alpha) / 2
+    upper_q <- 1 - lower_q
+    
+    in_ci <- rep(NA, 100)
+    for (i in athletes_h3.f) {
+      pred <- pred_samples_layers.f[, i, l]
+      actual   <- actual_bests.f[i]
+      in_ci[i] <- actual >= quantile(pred, lower_q, na.rm = TRUE) &
+                  actual <= quantile(pred, upper_q, na.rm = TRUE)
+    }
+    coverage_layers.f[l, a_idx] <- mean(in_ci, na.rm = TRUE)
+  }
+}
+
+# Calibration Table
+cat("(W) Calibration Results (By Layer):\n")
+cat(sprintf("%-10s %-8s %-8s %-8s %-8s %-8s %-8s\n", 
+            "Horizon", "50%", "60%", "70%", "80%", "90%", "95%"))
+for (l in 1:3) {
+  cat(sprintf("%-10s %-8.4f %-8.4f %-8.4f %-8.4f %-8.4f %-8.4f\n",
+              paste("Layer", l),
+              coverage_layers.f[l,1],
+              coverage_layers.f[l,2],
+              coverage_layers.f[l,3],
+              coverage_layers.f[l,4],
+              coverage_layers.f[l,5],
+              coverage_layers.f[l,6]))
+}
+
+
+# Plot
+plot(NA, NA,
+     xlim = c(0.45, 1), ylim = c(0, 1),
+     xlab = "Nominal Coverage", ylab = "Observed Coverage",
+     main = "(W) Calibration Plot by Prediction Layer (Horizon 1)")
+
+abline(0, 1, col = "grey50", lty = 2, lwd = 1.5)
+abline(h = seq(0, 1, by = 0.1), col = "grey90")
+abline(v = seq(0.5, 1, by = 0.1), col = "grey90")
+
+cols <- c("plum", "seagreen", "steelblue")
+for (l in 1:3) {
+  lines(alpha_levels, coverage_layers.f[l, ],
+        type = "b", pch = 19,
+        col = cols[l], lwd = 2, cex = 1.2)
+}
+
+legend("topleft",
+       legend = c("Perfect calibration",
+                  "Layer 1: g(a) only",
+                  "Layer 2: g(a) + f_i(z)",
+                  "Layer 3: Full Model"),
+       col = c("grey50", cols),
+       lty = c(2, 1, 1, 1),
+       pch = c(NA, 19, 19, 19),
+       lwd = 2, bty = "n")
+
+cat("Layer 3 female 95% coverage:", 
+    round(coverage_layers.f[3, 6], 3), "\n")
+cat("Layer 2 female 95% coverage:", 
+    round(coverage_layers.f[2, 6], 3), "\n")
+cat("Layer 1 female 95% coverage:", 
+    round(coverage_layers.f[1, 6], 3), "\n")
+```
+
